@@ -120,14 +120,49 @@ EOF
 systemctl enable dhcpcd
 systemctl restart dhcpcd
 
-# ── dnsmasq konfigurieren ────────────────────────────────────
-if [ -f /etc/dnsmasq.conf ]; then cp /etc/dnsmasq.conf /etc/dnsmasq.conf.bak.$(date +%s); fi
+
+# ── dnsmasq: DHCP + ipset-Befüllung ──────────────────────────
+cp /etc/dnsmasq.conf /etc/dnsmasq.conf.bak.$(date +%s) 2>/dev/null || true
 cat >/etc/dnsmasq.conf <<EOF
 interface=${WLAN_IFACE}
 dhcp-range=${DHCP_RANGE_START},${DHCP_RANGE_END},255.255.255.0,24h
 domain-needed
 bogus-priv
+# ipset-Zuordnung für Captive-Portal-Domains (Android/Google/Samsung)
+conf-dir=/etc/dnsmasq.d/,*.conf
 EOF
+
+mkdir -p /etc/dnsmasq.d
+cat >/etc/dnsmasq.d/10-ipset-capport.conf <<'EOF'
+# Alle IPs dieser Domains landen im ipset "capport4"
+ipset=/connectivitycheck.gstatic.com/capport4
+ipset=/clients3.google.com/capport4
+ipset=/www.google.com/capport4
+ipset=/www.google.eu/capport4
+# Samsung/OneUI (conn-service/allawnos)
+ipset=/allawnos.com/capport4
+ipset=/conn-service-eu-04.allawnos.com/capport4
+ipset=/conn-service-eu-05.allawnos.com/capport4
+EOF
+
+# ── ipset: Set beim Boot anlegen (vor dnsmasq & iptables) ───
+cat >/etc/systemd/system/ipset-capport.service <<'EOF'
+[Unit]
+Description=Create ipset for captive-portal exemptions
+DefaultDependencies=no
+Before=netfilter-persistent.service dnsmasq.service
+Wants=dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ipset create capport4 hash:ip family inet -exist
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable ipset-capport.service
+systemctl start ipset-capport.service
 
 # ── hostapd konfigurieren ────────────────────────────────────
 mkdir -p /etc/hostapd
@@ -158,10 +193,18 @@ else
 fi
 sysctl -p
 
-# ── NAT + transparente Redirects für mitmproxy ──────────────
-iptables -t nat -A POSTROUTING -o ${ETH_IFACE} -j MASQUERADE
+
+# ── NAT + MITM-Redirects (mit capport-Ausnahme) ─────────────
+iptables -t nat -I PREROUTING 1 -i ${WLAN_IFACE} -p tcp -m set --match-set capport4 dst \
+  -m multiport --dports 80,443 -j RETURN
+
+# NAT über erkanntes Upstream-Interface
+[ -n "${UP_IF:-}" ] && iptables -t nat -A POSTROUTING -o "${UP_IF}" -j MASQUERADE
+
+# Transparente Umleitung auf mitmproxy (Port 8080)
 iptables -t nat -A PREROUTING -i ${WLAN_IFACE} -p tcp --dport 80  -j REDIRECT --to-port 8080
 iptables -t nat -A PREROUTING -i ${WLAN_IFACE} -p tcp --dport 443 -j REDIRECT --to-port 8080
+
 netfilter-persistent save
 
 # ── DNS (optional) ───────────────────────────────────────────
