@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Einstellungen{% endblock %}
+
+{% block content %}
+<form method="post" action="/settings/save">
+  <div class="row g-3">
+
+    <!-- MQTT -->
+    <div class="col-lg-6">
+      <div class="card">
+        <div class="card-header">MQTT</div>
+        <div class="card-body">
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="mqtt_enabled" name="mqtt_enabled"
+                   {% if cfg.get('mqtt', {}).get('enabled', False) %}checked{% endif %}>
+            <label class="form-check-label" for="mqtt_enabled">Aktiviert</label>
+          </div>
+          <div class="row g-2">
+            <div class="col-8"><label class="form-label">Host</label>
+              <input class="form-control" name="mqtt_host" value="{{ cfg.get('mqtt', {}).get('host','') }}">
+            </div>
+            <div class="col-4"><label class="form-label">Port</label>
+              <input class="form-control" type="number" name="mqtt_port" value="{{ cfg.get('mqtt', {}).get('port',1883) }}">
+            </div>
+            <div class="col-6"><label class="form-label">User</label>
+              <input class="form-control" name="mqtt_user" value="{{ cfg.get('mqtt', {}).get('user','') }}">
+            </div>
+            <div class="col-6"><label class="form-label">Passwort</label>
+              <input class="form-control" type="password" name="mqtt_password" value="{{ cfg.get('mqtt', {}).get('password','') }}">
+            </div>
+            <div class="col-12"><label class="form-label">Base</label>
+              <input class="form-control" name="mqtt_base" value="{{ cfg.get('mqtt', {}).get('base','screeny') }}">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tasmota -->
+    <div class="col-lg-6">
+      <div class="card">
+        <div class="card-header">Tasmota</div>
+        <div class="card-body">
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="tasmota_enabled" name="tasmota_enabled"
+                   {% if cfg.get('tasmota', {}).get('enabled', False) %}checked{% endif %}>
+            <label class="form-check-label" for="tasmota_enabled">Aktiviert</label>
+          </div>
+          <div class="row g-2">
+            <div class="col-12"><label class="form-label">Host</label>
+              <input class="form-control" name="tasmota_host" value="{{ cfg.get('tasmota', {}).get('host','') }}">
+            </div>
+            <div class="col-6"><label class="form-label">User</label>
+              <input class="form-control" name="tasmota_user" value="{{ cfg.get('tasmota', {}).get('user','') }}">
+            </div>
+            <div class="col-6"><label class="form-label">Passwort</label>
+              <input class="form-control" type="password" name="tasmota_password" value="{{ cfg.get('tasmota', {}).get('password','') }}">
+            </div>
+            <div class="col-12"><label class="form-label">Timeout (s)</label>
+              <input class="form-control" type="number" name="tasmota_timeout" value="{{ cfg.get('tasmota', {}).get('timeout',5) }}">
+            </div>
+          </div>
+          <hr/>
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="tasmota_power_control" name="tasmota_power_control"
+                   {% if cfg.get('tasmota', {}).get('power_control', False) %}checked{% endif %}>
+            <label class="form-check-label" for="tasmota_power_control">Panel per Player steuern</label>
+          </div>
+          <div class="col-12"><label class="form-label">Wartezeit nach Einschalten (s)</label>
+            <input class="form-control" type="number" name="tasmota_power_wait_s"
+                  value="{{ cfg.get('tasmota', {}).get('power_wait_s', 15) }}">
+            <div class="form-label">Zeit zwischen Einschalten und Layout-Push.</div>
+          </div>
+          <div class="col-12"><label class="form-label">Auto-Aus nach Inaktivität (min)</label>
+            <input class="form-control" type="number" name="tasmota_auto_off_min"
+                  value="{{ cfg.get('tasmota', {}).get('auto_off_min', 5) }}">
+            <div class="form-label">Wenn keine Playlist läuft.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Speichern/Abbrechen -->
+    <div class="col-12 d-flex gap-2">
+      <button class="btn btn-primary">Speichern</button>
+      <a class="btn btn-outline-secondary" href="/">Abbrechen</a>
+    </div>
+  </div>
+</form>
+
+<!-- NEU: Autostart separat -->
+<div class="card mt-4">
+  <div class="card-header">Autostart</div>
+  <div class="card-body">
+    <form class="row g-2 align-items-end" method="post" action="/settings/autostart">
+      <div class="col-sm-8 col-md-6 col-lg-4">
+        <label class="form-label">Playlist beim Start automatisch laden</label>
+        <select name="plname" class="form-select">
+          <option value="">(kein Autostart)</option>
+          {% for p in playlists %}
+            <option value="{{p}}" {% if cfg.get('autostart')==p %}selected{% endif %}>{{p}}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-outline-primary">Übernehmen</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- Hersteller-Import -->
+<div class="card mt-4">
+  <div class="card-header">nuvo LED Playlist - Import</div>
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-5">
+        <label class="form-label">Laufwerk / Mount</label>
+        <select id="imp_root" class="form-select"></select>
+      </div>
+      <div class="col-md-3">
+        <div class="form-check mt-4">
+          <input class="form-check-input" type="checkbox" id="imp_recursive" checked>
+          <label class="form-check-label" for="imp_recursive">Unterordner durchsuchen</label>
+        </div>
+      </div>
+      <div class="col-auto">
+        <button id="imp_scan" class="btn btn-outline-primary">Suche starten</button>
+      </div>
+    </div>
+
+    <div id="imp_results" class="mt-3"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block content_scripts %}
+  <script src="/static/js/settings.js"></script>
+{% endblock %}

@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block title %}Medienverwaltung{% endblock %}
+
+{% block head %}
+<style>
+  .toolbar{gap:.5rem;flex-wrap:wrap}
+  .file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .file-card{background:#0f151d;border:1px solid #233244;border-radius:14px;transition:transform .08s ease}
+  .file-card:hover{transform:translateY(-1px)}
+  .file-thumb{width:100%;height:150px;object-fit:scale-down;border-radius:10px;background:#000}
+  .file-name{font-size:.95rem;margin-top:.5rem;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .file-type{display:inline-block;margin:.25rem auto}
+  .file-actions{display:flex;justify-content:space-between;align-items:center;margin-top:.25rem}
+  .media-selected{outline:2px solid #3b82f6;border-radius:14px}
+
+  /* Liste */
+  .mini-thumb{width:20px;height:20px;object-fit:cover;border-radius:4px;background:#000}
+  .list-thumb-cell{width:28px}
+  .list-check-cell{width:32px}
+  .table-dark td,.table-dark th{vertical-align:middle}
+
+  #pl-sidebar{min-width:280px}
+  .pl-row {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:.75rem;
+    padding:.35rem .5rem;
+    border-radius:.5rem;
+    border:1px solid #223142;
+    background:#0f151d;
+  }
+  .pl-row + .pl-row { margin-top:.5rem; }
+
+  .pl-name {
+    display:flex;
+    align-items:center;
+    gap:.5rem;
+    min-width:0;
+  }
+  .pl-name .title {
+    color:#e6e8ea;
+    font-weight:500;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .pl-name .hint {
+    color:#9aa7b5;
+    font-size:.8rem;
+  }
+  .pl-actions {
+    display:flex;
+    align-items:center;
+    gap:.35rem;
+  }
+  .btn-icon {
+    width:34px; height:34px;
+    display:inline-flex; align-items:center; justify-content:center;
+    border-radius:.5rem;
+    padding:0;
+  }
+  .btn-outline-secondary { border-color:#34495f; color:#cfd9e3; }
+  .btn-outline-secondary:hover { background:#1a2430; border-color:#4b647e; color:#fff; }
+  .btn-primary { box-shadow:none; }
+    .pl-row{
+    display:grid;
+    grid-template-columns: 1fr auto auto; 
+    align-items:center;
+    gap:.5rem .75rem;
+    padding:.45rem .6rem;
+    border:1px solid #223142;
+    border-radius:.5rem;
+    background:#0f151d;
+    }
+
+    @media (max-width:650px){
+    .pl-row{
+        grid-template-columns: 1fr; 
+    }
+    .pl-actions{
+        grid-column: 1 / -1;        
+        justify-self: end;          
+        margin-top:.35rem;
+        display:flex;
+        gap:.35rem;
+        flex-wrap:wrap;
+    }
+    }
+  .pl-title {
+    color:#e6e8ea; font-weight:600; text-decoration:none;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .pl-title:hover { text-decoration: underline; }
+  .pl-badges { display:flex; align-items:center; gap:.4rem; }
+  .pl-actions { display:flex; align-items:center; gap:.35rem; }
+
+  /* compact badges that line up nicely */
+  .badge-count { background:#1a2633; color:#cfe0f0; }
+  .badge-status-none { background:#2a3340; color:#9aa7b5; }
+  .badge-status-some { background:#2c3e50; color:#f1c40f; }
+  .badge-status-all  { background:#123d1f; color:#b1f0c5; }
+
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h3 class="mb-0">Medienverwaltung</h3>
+  <div>
+    <a class="btn btn-outline-secondary" href="/">Zurück</a>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body d-flex align-items-center toolbar">
+    <div class="input-group" style="max-width:360px">
+      <span class="input-group-text">Suche</span>
+      <input id="mm-search" class="form-control" placeholder="Dateinamen filtern…">
+    </div>
+
+    <div class="btn-group ms-2" role="group" aria-label="Ansicht">
+      <button id="btn-grid" class="btn btn-outline-secondary btn-sm active" title="Grid">Grid</button>
+      <button id="btn-list" class="btn btn-outline-secondary btn-sm" title="Liste">Liste</button>
+    </div>
+
+    <div class="dropdown ms-2">
+      <button class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown">Sortierung</button>
+      <ul class="dropdown-menu dropdown-menu-dark">
+        <li><a class="dropdown-item mm-sort" data-sort="name">Name</a></li>
+        <li><a class="dropdown-item mm-sort" data-sort="mtime">Geändert</a></li>
+        <li><a class="dropdown-item mm-sort" data-sort="size">Größe</a></li>
+      </ul>
+    </div>
+
+    <div class="dropdown ms-2">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+            Typ
+        </button>
+        <div class="dropdown-menu dropdown-menu-dark p-3" id="mm-type-filter">
+            <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="image" id="mm-type-image" checked>
+            <label class="form-check-label" for="mm-type-image">Bilder</label>
+            </div>
+            <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="video" id="mm-type-video" checked>
+            <label class="form-check-label" for="mm-type-video">Videos</label>
+            </div>
+            <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="other" id="mm-type-other" checked>
+            <label class="form-check-label" for="mm-type-other">Andere</label>
+            </div>
+        </div>
+    </div>
+
+
+    <form id="uploadForm" class="ms-auto d-flex align-items-center gap-2" enctype="multipart/form-data">
+    <input class="form-control form-control-sm" type="file" id="upFiles" name="files" multiple>
+    <button id="btnUpload" class="btn btn-primary btn-sm" type="submit">
+        Upload
+    </button>
+    </form>
+
+    <div class="progress ms-auto" id="upProgWrap" style="width:260px; display:none;">
+    <div id="upProg" class="progress-bar" role="progressbar" style="width:0%">0%</div>
+    </div>
+    
+    <div class="form-check form-switch ms-2">
+      <input class="form-check-input" type="checkbox" id="mm-plmode">
+      <label class="form-check-label" for="mm-plmode">Playlist-Modus</label>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-auto order-1 order-lg-2">
+    
+    <div id="pl-sidebar" class="card d-none">
+      <div class="card-header d-flex align-items-center">
+        <strong class="me-auto">Zu Playlists zuweisen</strong>
+        <span class="badge bg-secondary" id="mm-selected-count">0</span>
+      </div>
+      
+
+    <div class="input-group input-group-sm ms-2" style="max-width: 260px;">
+        <span class="input-group-text">Playlist-Filter</span>
+        <select id="mm-plfilter" class="form-select">
+            <option value="all" selected>Alle</option>
+            <option value="in">zeige nur ausgewählte</option>
+            <option value="notin">zeige nicht ausgewählte</option>
+        </select>
+        </div>
+        <small id="mm-plfilter-hint" class="ms-2 text-secondary d-none">
+        (ausgewählte Playlist: <span id="mm-plfilter-pl">–</span>)
+        </small>
+
+      <div class="card-body">
+        <div id="pl-panel" class="vstack gap-2"></div>
+        <div id="mm-pl-list" class="vstack gap-2"></div>
+        <hr class="my-3">
+        <div class="small text-secondary">
+          Änderungen wirken auf <span id="mm-selected-count-2">0</span> ausgewählte Datei(en).
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Hauptbereich -->
+  <div class="col-lg order-2 order-lg-1">
+    <!-- Grid -->
+    <div id="grid" class="file-grid"></div>
+
+    <!-- Liste -->
+    <div class="table-responsive d-none" id="list-wrap">
+      <table id="list" class="table table-dark table-striped table-hover align-middle mb-0">
+        <thead>
+          <tr>
+            <th class="list-check-cell" style="display: none;"></th>
+            <th class="list-thumb-cell"></th>
+            <th>Name</th>
+            <th>Typ</th>
+            <th class="text-end">Größe</th>
+            <th class="text-end">Geändert</th>
+            <th style="width:1%"></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+
+<!-- Rename Modal -->
+<div class="modal fade" id="renameModal" tabindex="-1">
+  <div class="modal-dialog">
+    <form class="modal-content" id="renameForm">
+      <div class="modal-header">
+        <h5 class="modal-title">Umbenennen</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <input class="form-control" name="newname" required>
+        <input type="hidden" name="oldname">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" type="submit">Speichern</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block content_scripts %}
+  <script src="/static/js/media.js"></script>
+
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Panel-Konfiguration{% endblock %}
+{% block content %}
+<style>
+    body { background: #0b0f14; color: #e6e8ea; }
+    .grid-wrap {
+      display: grid;
+      grid-template-columns: repeat(var(--cols), 96px);
+      grid-template-rows: repeat(var(--rows), 96px);
+      gap: 8px;
+      padding: 10px;
+      background: #0f151d;
+      border: 1px dashed #2b3a4c;
+      border-radius: 12px;
+    }
+    .cell {
+      display: grid; place-items: center;
+      background: #101820;
+      border: 1px solid #203144;
+      border-radius: 10px;
+      color: #8ea0b3;
+      position: relative;
+      cursor: pointer;
+    }
+    .cell.assigned { background: #17212c; color: #e6edf5; border-color: #31506e; }
+    .cell::after {
+      content: attr(data-pos);
+      position: absolute; top: 4px; left: 6px;
+      font-size: 0.7rem; color: #5a6c7f;
+    }
+    .panel-item {
+      background:#0f151d; color:#dbe6ef; border:1px solid #263241;
+      border-radius: 10px; padding:6px 10px; cursor:grab;
+    }
+    .panel-item.used { opacity:0.5; text-decoration: line-through; cursor: default; }
+    .status { font-size: 0.9rem; }
+  </style>
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-2"><label class="form-label">Spalten</label><input type="number" id="cols" class="form-control" value="2" min="1"></div>
+      <div class="col-md-2"><label class="form-label">Zeilen</label><input type="number" id="rows" class="form-control" value="1" min="1"></div>
+      <div class="col-md-2"><label class="form-label">Panel-Breite</label><input type="number" id="panel_w" class="form-control" value="128" min="16" step="16"></div>
+      <div class="col-md-2"><label class="form-label">Panel-Höhe</label><input type="number" id="panel_h" class="form-control" value="128" min="16" step="16"></div>
+      <div class="col-md-4"><label class="form-label">Ziel-IP (leer = Broadcast)</label><input type="text" id="dest_ip" class="form-control" placeholder="255.255.255.255"></div>
+      <div class="col-12 mt-3 d-flex flex-wrap gap-2">
+        <button class="btn btn-outline-info" id="btn-discover">Panels suchen</button>
+        <button class="btn btn-outline-primary" id="btn-save">Speichern</button>
+        <button class="btn btn-primary" id="btn-send">Konfig senden</button>
+        <button class="btn btn-outline-warning" id="btn-test">Testbild</button>
+        <button class="btn btn-outline-warning" id="btn-test-loop">Testbild loop</button>
+        <a class="btn btn-outline-danger ms-auto" href="/">Zurück</a>
+      </div>
+      <div class="col-12 mt-3 d-flex flex-wrap gap-2">
+        Bild übertragen
+        <input type="file" id="imgfile" class="form-control" accept="image/*">
+        <button class="btn btn-secondary" id="btn-sendimg">Bild senden</button>
+      </div>
+      <div class="col-12 mt-2"><div id="status" class="text-success bold">Bereit.</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-header">Gefundene Panels</div><div class="card-body"><div id="panel-list" class="d-grid gap-2"></div></div></div>
+  </div>
+  <div class="col-lg-8">
+    <div class="card h-100"><div class="card-header">Raster</div><div class="card-body"><div id="grid" class="grid-wrap" style="--cols:2; --rows:1;"></div></div></div>
+  </div>
+</div>
+
+<script src="/static/js/panel_config.js"></script>
+{% endblock %}

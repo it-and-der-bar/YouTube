@@ -1,0 +1,277 @@
+{% extends "base.html" %}
+{% block title %}Playlist bearbeiten – {{ pl.name }}{% endblock %}
+
+{% block head %}
+  <style>
+    .item-card { border-radius: 14px; box-shadow: 0 4px 18px rgba(0,0,0,.06); }
+    .handle { cursor: grab; user-select: none; font-size: 18px; }
+    .thumb { width: 96px; height: 96px; border-radius: 10px; background:#000; object-fit: cover; }
+    .thumb.fit { object-fit: contain; }
+    .thumb.placeholder { display:flex; align-items:center; justify-content:center; color:#9aa; font-size:12px; border:1px dashed #345; }
+    .badge-type { text-transform: uppercase; font-size: .7rem; }
+    .adv { display:none; }
+    .code-wrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
+    @media (max-width:576px){ .thumb{ width:72px; height:72px } .code-wrap{ max-width:48vw } }
+  </style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+
+  <div class="d-flex align-items-center mb-3">
+    <h3 class="me-auto mb-0">Playlist: {{ pl.name }}</h3>
+    <form method="post" action="/playlist/{{ pl.name }}/delete" onsubmit="return confirm('Löschen?')">
+      <button class="btn btn-outline-danger">Playlist löschen</button>
+    </form>
+    <a class="btn btn-secondary ms-2" href="/">Zurück</a>
+  </div>
+
+  <form id="pl-form" method="post" action="/playlist/{{ pl.name }}/save">
+    <!-- Wiedergabe -->
+    <div class="card p-3 mb-3">
+      <div class="row g-2 align-items-center">
+        <div class="col-auto"><label class="form-label mb-0" for="pl-mode">Wiedergabe</label></div>
+        <div class="col-auto">
+          <select class="form-select form-select-sm" name="mode" id="pl-mode">
+            <option value="repeat" {{ 'selected' if pl.get('mode','repeat')=='repeat' else '' }}>Repeat</option>
+            <option value="random" {{ 'selected' if pl.get('mode','repeat')=='random' else '' }}>Random</option>
+            <option value="once"   {{ 'selected' if pl.get('mode','repeat')=='once'   else '' }}>Once</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Items -->
+    <div id="items" class="vstack gap-3">
+      {% for it in items %}
+      {% set file = it.file %}
+      {% set is_url = '://' in file %}
+      {% set lower = file | lower %}
+      {% set is_clock = lower.startswith('clock://') %}
+      {% set is_text  = lower.startswith('text://') or ('/stream/text' in lower) %}
+      {% set is_img = (lower.endswith('.png') or lower.endswith('.jpg') or lower.endswith('.jpeg') or lower.endswith('.gif') or lower.endswith('.bmp') or lower.endswith('.webp')) and not is_url %}
+      {% set is_vid = (lower.endswith('.mp4') or lower.endswith('.mov') or lower.endswith('.mkv') or lower.endswith('.avi') or lower.endswith('.webm')) and not is_url %}
+      <div class="card item-card p-2"
+           data-file="{{ file }}"
+           data-mode="{{ it.get('mode', 'fill') }}"
+           data-loop="{{ it.get('loop', 1) }}"
+           data-duration="{{ it.get('duration', 0) }}"
+           data-start="{{ it.get('start', '') }}"
+           data-end="{{ it.get('end', '') }}">
+
+        <div class="d-flex gap-3 align-items-center">
+          <span class="handle px-2" title="Ziehen zum Sortieren">☰</span>
+
+          <div class="thumb-wrap">
+            {% if is_clock %}
+              <div class="thumb placeholder">Uhr</div>
+            {% elif is_text or is_img or is_vid %}
+              <img class="thumb {{ 'fit' if it.get('mode','fill')=='fit' else '' }}"
+                   src="/api/thumb?file={{ file | urlencode }}" loading="lazy" alt="">
+            {% else %}
+              <div class="thumb placeholder">{{ file.split('://')[0] if is_url else 'Datei' }}</div>
+            {% endif %}
+          </div>
+
+          <div class="flex-grow-1">
+            <div class="d-flex flex-wrap align-items-center gap-2">
+              <span class="badge rounded-pill text-bg-secondary badge-type" data-badge></span>
+              <code class="small text-break code-wrap" data-name></code>
+            </div>
+
+            <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
+              <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-primary {{ '' if it.get('mode','fill')=='fit' else 'active' }}" data-setmode="fill">Cover</button>
+                <button type="button" class="btn btn-outline-primary {{ 'active' if it.get('mode','fill')=='fit' else '' }}" data-setmode="fit">Fit</button>
+              </div>
+
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-adv-toggle>Erweitert</button>
+
+              {% if is_text %}
+                <button type="button" class="btn btn-sm btn-outline-primary" data-edit-text>Bearbeiten</button>
+              {% endif %}
+
+              <button type="button" class="btn btn-sm btn-outline-danger" data-remove>Entfernen</button>
+            </div>
+
+            <div class="adv mt-2">
+              <div class="row g-2">
+                <div class="col-6 col-sm-3">
+                  <label class="form-label small">Dauer (s, Bild/Stream)</label>
+                  <input type="number" class="form-control form-control-sm" min="0" value="{{ it.get('duration', 0) }}" data-duration>
+                </div>
+                <div class="col-6 col-sm-3">
+                  <label class="form-label small">Loop</label>
+                  <input type="number" class="form-control form-control-sm" min="1" value="{{ it.get('loop', 1) }}" data-loop>
+                </div>
+                <div class="col-12 col-sm-3">
+                  <label class="form-label small">Start</label>
+                  <input type="datetime-local" class="form-control form-control-sm" value="{{ it.get('start','') }}" data-start>
+                </div>
+                <div class="col-12 col-sm-3">
+                  <label class="form-label small">Ende</label>
+                  <input type="datetime-local" class="form-control form-control-sm" value="{{ it.get('end','') }}" data-end>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      {% endfor %}
+    </div>
+
+    <!-- Aktionen -->
+    <div class="mt-3 d-flex gap-2">
+      <button type="button" class="btn btn-outline-secondary" data-add-media>+ Aus Medien</button>
+      <button type="button" class="btn btn-outline-secondary" data-add-stream>+ Stream</button>
+      <button type="button" class="btn btn-outline-secondary" data-add-clock>+ Uhr</button>
+      <button type="button" class="btn btn-outline-secondary" data-add-text>+ Text</button>
+      <a class="btn btn-outline-danger ms-auto" href="/">Zurück</a>
+      <button class="btn btn-success">Speichern</button>
+    </div>
+
+    <!-- Hidden-Felder (JS füllt hier rein) -->
+    <div id="hidden"></div>
+  </form>
+</div>
+
+<!-- Modals -->
+<!-- Modals -->
+<div class="modal fade modal-dark" id="mediaModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-scrollable modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Medien auswählen</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+      </div>
+      <div class="modal-body">
+        <input class="form-control mb-2" id="mediaSearch" placeholder="Suche…">
+        <div id="mediaGrid" class="row g-2"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade modal-dark" id="textModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="textForm">
+      <div class="modal-header">
+        <h5 class="modal-title">Text</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+      </div>
+      <div class="modal-body vstack gap-3">
+        <div>
+          <label class="form-label">Text (UTF, Emojis 😊)</label>
+          <textarea class="form-control" name="text" rows="3" required></textarea>
+        </div>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Textfarbe</label>
+            <input type="color" class="form-control form-control-color" name="color" value="#ffffff">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Hintergrund</label>
+            <input type="color" class="form-control form-control-color" name="bg" value="#000000">
+          </div>
+        </div>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Schriftgröße</label>
+            <input type="number" class="form-control" name="font_size" value="24" min="8" max="128">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Scroll-Speed (px/s)</label>
+            <input type="number" class="form-control" name="speed_px_s" value="40" min="10" max="300">
+          </div>
+        </div>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Horizontal</label>
+            <select class="form-select" name="align_h">
+              <option value="left">Links</option>
+              <option value="center" selected>Zentriert</option>
+              <option value="right">Rechts</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Vertikal</label>
+            <select class="form-select" name="align_v">
+              <option value="top">Oben</option>
+              <option value="middle" selected>Mittig</option>
+              <option value="bottom">Unten</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" type="button" id="textPreview">Vorschau</button>
+        <button class="btn btn-primary" type="submit">Speichern</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- FIX: hier war vorher class="modal fade modal-" -->
+<div class="modal fade modal-dark" id="streamModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="streamForm">
+      <div class="modal-header">
+        <h5 class="modal-title">Stream hinzufügen</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+      </div>
+      <div class="modal-body">
+        <input class="form-control" name="url" placeholder="rtsp://…">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" type="submit">Hinzufügen</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal fade modal-dark" id="clockModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="clockForm">
+      <div class="modal-header">
+        <h5 class="modal-title">Uhr hinzufügen</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+      </div>
+      <div class="modal-body vstack gap-3">
+        <div>
+          <label class="form-label">Variante</label>
+          <select class="form-select" name="variant">
+            <option value="time">Uhrzeit</option>
+            <option value="time_date">Uhrzeit + Datum</option>
+            <option value="time_date_weather">Uhr + Datum + Wetter</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label">Dauer (Sekunden, 0 = unendlich)</label>
+          <input type="number" class="form-control" name="duration" min="0" value="30">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" type="submit">Hinzufügen</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- Toast -->
+<div class="position-fixed top-0 end-0 p-3" style="z-index:1080">
+  <div id="saveToast" class="toast align-items-center text-bg-success border-0" role="status" aria-live="polite" aria-atomic="true">
+    <div class="d-flex">
+      <div class="toast-body">Gespeichert.</div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+
+<!-- Libs (Bootstrap kommt aus base.html) -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<script>window.PL_MEDIA = {{ media | tojson }};</script>
+<script src="/static/js/playlist_edit.js"></script>
+{% endblock %}

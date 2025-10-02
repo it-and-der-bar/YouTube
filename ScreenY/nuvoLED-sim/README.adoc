@@ -1,0 +1,112 @@
+# NuvoLED Simulator
+
+Ein Simulator, um **LED‑Panels** (NuvoLED‑Protokoll) ohne echte Hardware zu testen. 
+Er rendert eingehende Frames in einem Pygame‑Fenster, unterstützt Panel‑Grids, einfache Gamma‑Korrektur und mehrere Datenformate (Panel‑Chunks / Full‑Frame).
+
+> Originalbeispiel aus der ZIP:  
+> `python sim.py --panels 2x2 --led-gap 1 --mac16-start 0xA00c --mac32-base 0x1A00c --bind-ip 127.0.0.9`
+
+---
+## Ausschluss
+Die Software kommt wie sie ist, es wird keine Gewährleistung, Garantie oder Haftung für Schäden übernommen.
+Benutztung auf eigene Gefahr!
+
+## Inhalte
+- `sim.py` – Simulator & UDP‑Server
+- `README.adoc` – Kurzbeispiel (Original)
+- diese `README.md` – Ausführliche Anleitung
+
+## Features
+- 🧱 Panel‑Grids mit frei wählbarer Größe (z. B. 3×2 Module, je 128×128)
+- ↔️ Zwei De‑Interleave‑Modi: `panel` (modulweise) oder `row` (zeilenweise)
+- 🎛️ Konfigurierbarer **LED‑Look** (Gap, Farbe, Außenrand)
+- 🎨 Optionales **Gamma‑/LUT‑Processing**
+- 🔐 **Strict‑Mode** für strenge Paket‑ und Protokollprüfung
+- 🧪 Debug‑Dumps (Frames/Unknown/Gamma) in ein Verzeichnis
+
+## Voraussetzungen
+- Python 3.8+
+- Abhängigkeiten:
+  ```bash
+  pip install pygame pillow numpy
+  ```
+
+## Schnellstart
+```bash
+python sim.py --panels 2x2 --panel 128x128 --bind-ip 0.0.0.0
+```
+- Ein Fenster **„NuvoLED Simulator“** öffnet sich.
+- mit nuvoLED Home oder der web-app von screeny kann das Panel bespielt werden.
+
+## CLI‑Optionen
+```text
+--bind-ip <addr>                 (Default: 0.0.0.0) IP, an die der UDP‑Socket gebunden wird
+--panels <WxH>                   (Default: 1x1)     Grid‑Größe, z. B. 3x2
+--panel <WxH>                    (Default: 128x128) Panel‑Auflösung eines Moduls
+--raw-order [bgr|rgb]            (Default: bgr)     Byte‑Reihenfolge der Rohdaten
+--dump                           (Flag)             Schreibe Debug‑Dumps
+--dump-dir <path>                                   Zielordner für Dumps (Default: Temp)
+--respect-config-offsets         (Flag)             Panel‑Offsets aus CONFIG statt Grid‑Layout
+--no-apply-lut                   (Flag)             Gamma‑LUT **nicht** anwenden
+--block-h [16|32]                (Default: 32)      Blockhöhe für RAW‑Chunks
+--interleave [panel|row]         (Default: panel)   De‑Interleave‑Variante
+--panel-gap <int>                (Default: 1)       Sichtbarer Rahmen zwischen Panels (px)
+--led-gap <int>                  (Default: 1)       Pixel‑Gap rechts/unten (LED‑Look; 0=aus)
+--led-gap-color <#hex|r,g,b>     (Default: 26,26,26)Farbe für LED‑Gaps, z. B. „#1e1e1e“
+--outer-margin <int>             (Default: 12)      Außenrand um das Canvas (px)
+--order-mode [mac16|nblock|config|grid] (Default: config) Zuordnung/Adressierung
+--place-mode [layout|id]         (Default: layout)  Platzierung via CONFIG‑Offsets oder lokal nach IDs
+--strict                         (Flag)             Strenger Protokollmodus
+--mac32-base <hex>               (Default: 0x10B00000) High‑16 Bits für mac32
+--mac16-start <hex>              (Default: 0x0001)      Startwert für mac16 (Panel #1)
+```
+**Hinweise zu Eingabeformaten**
+- Größen werden als `Breite x Höhe` angegeben, z. B. `128x128` oder `3x2`.
+- Farben als `#RRGGBB` **oder** `r,g,b` (0–255).
+
+## Netzwerk & Protokoll (Kurzüberblick)
+- **UDP‑Port:** `2000` (Konstante `UDP_PORT`)
+- **Broadcast‑Adresse:** `255.255.255.255`
+- **Header‑Bytes:** `0x24 0x24`
+- **Nachrichtentypen** (Auszug):
+  - `MSG_REGISTER = 15`
+  - `MSG_FRAME = 20`
+  - `MSG_FRAME_FINISH = 30`
+  - `MSG_SYNC = 100`
+  - `MSG_CONFIG = 120`
+  - `MSG_REG_REQ = 130`
+  - `MSG_STATE = 140`
+  - `MSG_GAMMA = 127`
+
+### Frame‑Übertragung
+- **Full‑Frame:** Ein einzelner Puffer in `W*H*3` Bytes (RGB/BGR gemäß `--raw-order`).
+- **Panel‑Chunks:** Daten kommen in Blöcken (`--block-h` 16/32 Zeilen). `--interleave` gibt an, ob modul‑ oder zeilenweise gesendet wird.
+- Der Simulator re‑assembliert Chunks, achtet optional streng auf Indizes/Längen (`--strict`) und rendert in Echtzeit.
+
+### Platzierung & Adressierung
+- **order-mode `mac16`/`nblock`/`config`/`grid`:** steuert, in welcher Reihenfolge Module adressiert werden.
+- **place-mode `layout`:** nutzt Offsets aus CONFIG (empfohlen bei realistischen Layouts).
+- **place-mode `id`:** platziert lokal anhand der erkannten Modul‑IDs.
+
+## Beispiele
+**2×2‑Wand mit LED‑Look, feste MAC‑Basis**
+```bash
+python sim.py   --panels 2x2 --panel 128x128   --led-gap 1 --led-gap-color "#1e1e1e"   --mac16-start 0xA00c --mac32-base 0x1A00c   --bind-ip 127.0.0.9
+```
+
+**3×1‑Leiste, RAW in RGB gesendet, strenger Modus**
+```bash
+python sim.py --panels 3x1 --raw-order rgb --strict
+```
+
+**Dumps aktivieren und in Ordner schreiben**
+```bash
+python sim.py --dump --dump-dir ./dumps
+```
+
+## Lizenz
+Der Code darf nicht kommerziell weiterverwendet werden
+PolyForm Noncommercial
+—
+
+**Viel Spaß beim Simulieren!**
