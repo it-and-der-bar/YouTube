@@ -1,0 +1,1 @@
+Es ist fast nicht möglich das Panel so zu filmen/ fotografieren das es so rüberkommt wie es wirklich aussieht.
