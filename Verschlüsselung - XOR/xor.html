@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XOR-Verschlüsselung – Mini-Visualizer</title>
+  <style>
+    :root{
+      --bg:#0a0c12;
+      --panel:#0f1322;
+      --ink:#eaf5ff;
+      --muted:#8ea2c9;
+      --accent:#ff55c3;   /* Neon Pink */
+      --accent2:#4ef0ff;  /* Neon Cyan */
+      --accent3:#ffe066;  /* Neon Gelb */
+      --border:#1d2446;
+      --bit0:#14204a;     /* Bit 0 */
+      --bit1:#0f3c3a;     /* Bit 1 */
+      --xor:#7b35ff;      /* XOR */
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      background:
+        radial-gradient(1200px 800px at 20% -10%, rgba(255,85,195,.15), transparent 40%),
+        radial-gradient(1000px 700px at 110% 10%, rgba(78,240,255,.12), transparent 35%),
+        var(--bg);
+      color:var(--ink);
+      font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial
+    }
+    header{padding:16px 20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#0c1020,#0a0c12)}
+    header h1{margin:0;font-size:18px;letter-spacing:.3px}
+    .neonTitle{color:var(--accent); text-shadow:0 0 8px rgba(255,85,195,.8),0 0 20px rgba(255,85,195,.5)}
+    main{padding:20px;display:grid;gap:16px;grid-template-columns:1.2fr 1fr}
+    @media (max-width:1100px){main{grid-template-columns:1fr}}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:0 6px 30px rgba(0,0,0,.35)}
+    .card h2{margin:0 0 8px 0;font-size:15px;color:var(--muted);font-weight:600}
+    .card .body{padding:16px}
+    .row{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+    .row3{display:grid;gap:12px;grid-template-columns:1fr 1fr 1fr}
+    label{font-size:13px;color:var(--muted)}
+    textarea,input,select,button{width:100%;border-radius:10px;border:1px solid #2a3360;background:#0b0f20;color:var(--ink);padding:10px 12px}
+    textarea{min-height:96px;resize:vertical}
+    button{cursor:pointer;background:linear-gradient(180deg,#1b2250,#151b3e);border-color:#2f3a7a}
+    button:hover{filter:brightness(1.06)}
+    select:focus,textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px rgba(78,240,255,.25),0 0 0 1px var(--accent2)}
+    .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .small{font-size:12px;color:var(--muted)}
+    .mono{font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .output{display:grid;gap:10px}
+
+    /* Bits */
+    .bits{display:grid;gap:10px}
+    .bits .group{display:grid;gap:6px;padding:8px;border:1px solid var(--border);border-radius:12px;background:rgba(20,24,45,.55)}
+    .rowlabel{font-size:12px;color:var(--muted)}
+    .bitline{display:grid;grid-template-columns:repeat(8,1fr);gap:6px}
+    .bit{display:grid;place-items:center;border-radius:8px;padding:8px 0;border:1px solid #263059}
+    .bit.b0{background:var(--bit0)}
+    .bit.b1{background:var(--bit1)}
+    .bit.xor{background:linear-gradient(135deg,var(--xor),#3a2a8f)}
+
+    .tag{display:inline-grid;place-items:center;padding:0 .5rem;border:1px solid #33407b;background:#0f1536;color:#f4eaff;border-radius:999px;font-size:12px}
+    .help{font-size:12px;color:#cbd2ff;background:#0e1433;border:1px dashed #39448a;border-radius:10px;padding:10px}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .kbd{font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0c1027;border:1px solid #2a3469;border-radius:6px;padding:2px 6px}
+    .truth{border-collapse:separate;border-spacing:0 6px}
+    .truth td{padding:6px 10px;border:1px solid #2a3469;background:#0c1027}
+    .truth td:first-child{border-radius:10px 0 0 10px}
+    .truth td:last-child{border-radius:0 10px 10px 0}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#131a49;border:1px solid #2b3780;color:#cfe1ff;font-size:12px}
+    .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+    .meta .chip{font-size:11px;padding:2px 6px;border-radius:6px;background:#0c1027;border:1px solid #2a3469}
+  </style>
+</head>
+<body>
+  <header>
+    <div style="display:flex;align-items:center;gap:12px">
+      <img src="https://www.drensec.com/wp-content/uploads/logo-itanderbar.png" alt="Logo" style="height:56px;width:56px;object-fit:contain;border-radius:10px;">
+      <h1 class="neonTitle">🔐 XOR-Verschlüsselung – interaktive Visualisierung</h1>
+    </div>
+  </header>
+  <main>
+    <section class="card">
+      <div class="body">
+        <h2>Eingabe</h2>
+        <div class="flex" style="justify-content:space-between;gap:12px;margin-bottom:8px">
+          <div style="min-width:260px">
+            <label for="mode">Modus</label>
+            <select id="mode">
+              <option value="enc">Verschlüsseln (PT + Key → CT)</option>
+              <option value="dec">Entschlüsseln (CT + Key → PT)</option>
+              <option value="derive">Key ermitteln (CT + PT → Key)</option>
+            </select>
+          </div>
+          <div class="small">Hinweis: Der Schlüssel wird zyklisch wiederholt.</div>
+        </div>
+
+        <!-- ENC inputs -->
+        <div class="row" id="rowPT">
+          <div>
+            <label for="pt">Klartext (UTF-8)</label>
+            <textarea id="pt" placeholder="Beispiel: HELLO"></textarea>
+          </div>
+          <div>
+            <label for="key">Schlüssel</label>
+            <input id="key" placeholder="Beispiel: SECRET" />
+            <div class="flex small" style="margin-top:6px">
+              <label class="flex" style="gap:6px"><input type="checkbox" id="keyhex"> Schlüssel ist Hex</label>
+              <span class="pill">Schlüssel wird wiederholt</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- DEC inputs -->
+        <div class="row" id="rowCT" style="display:none">
+          <div>
+            <label for="ct">Ciphertext</label>
+            <textarea id="ct" placeholder="Hex oder Base64"></textarea>
+            <div class="flex small" style="margin-top:6px">
+              <label class="flex" style="gap:6px"><input type="radio" name="ctfmt" id="ctHex" checked> Hex</label>
+              <label class="flex" style="gap:6px"><input type="radio" name="ctfmt" id="ctB64"> Base64</label>
+            </div>
+          </div>
+          <div>
+            <label for="key2">Schlüssel</label>
+            <input id="key2" placeholder="Beispiel: SECRET" />
+            <div class="flex small" style="margin-top:6px">
+              <label class="flex" style="gap:6px"><input type="checkbox" id="keyhex2"> Schlüssel ist Hex</label>
+              <span class="pill">Schlüssel wird wiederholt</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- DERIVE inputs -->
+        <div class="row" id="rowDerive" style="display:none">
+          <div>
+            <label for="pt3">Klartext (UTF-8)</label>
+            <textarea id="pt3" placeholder="Beispiel: HELLO"></textarea>
+          </div>
+          <div>
+            <label for="ct3">Ciphertext</label>
+            <textarea id="ct3" placeholder="Hex oder Base64"></textarea>
+            <div class="flex small" style="margin-top:6px">
+              <label class="flex" style="gap:6px"><input type="radio" name="ctfmt3" id="ct3Hex" checked> Hex</label>
+              <label class="flex" style="gap:6px"><input type="radio" name="ctfmt3" id="ct3B64"> Base64</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="row3" style="margin-top:10px">
+          <div><button id="btnDemo">Demo laden</button></div>
+          <div><button id="btnClear">Alles löschen</button></div>
+          <div><button id="btnCopy">Kopieren</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="body">
+        <h2>Ausgabe</h2>
+        <div class="output" id="outArea"></div>
+        <div class="help">Nur die ersten <span id="limitTag" class="tag">8 Bytes</span> werden unten als Bits dargestellt.</div>
+      </div>
+    </section>
+
+    <section class="card" style="grid-column:1/-1">
+      <div class="body">
+        <h2>Bit-Ebene (pro Byte)</h2>
+        <div class="bits" id="bits"></div>
+        <div class="row" style="margin-top:14px">
+          <div>
+            <table class="truth">
+              <tr><td class="mono">A</td><td class="mono">B</td><td class="mono">A ⊕ B</td></tr>
+              <tr><td>0</td><td>0</td><td>0</td></tr>
+              <tr><td>0</td><td>1</td><td>1</td></tr>
+              <tr><td>1</td><td>0</td><td>1</td></tr>
+              <tr><td>1</td><td>1</td><td>0</td></tr>
+            </table>
+          </div>
+          <div class="help">
+            XOR („exklusives Oder“) vergleicht Bits: 1, wenn die Bits verschieden sind, sonst 0. Auf Byte-Ebene wird das auf alle 8 Bits angewendet.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (sel)=>document.querySelector(sel);
+
+    const mode = $('#mode');
+
+    // enc
+    const pt = $('#pt');
+    const key = $('#key');
+    const keyhex = $('#keyhex');
+    // dec
+    const ct = $('#ct');
+    const key2 = $('#key2');
+    const keyhex2 = $('#keyhex2');
+    const ctHex = $('#ctHex');
+    const ctB64 = $('#ctB64');
+    // derive
+    const pt3 = $('#pt3');
+    const ct3 = $('#ct3');
+    const ct3Hex = $('#ct3Hex');
+    const ct3B64 = $('#ct3B64');
+
+    const outArea = $('#outArea');
+    const bits = $('#bits');
+
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const BYTE_LIMIT = 8;
+    document.getElementById('limitTag').textContent = BYTE_LIMIT + ' Bytes';
+
+    function hexToBytes(hex){
+      if(!hex) return new Uint8Array();
+      hex = hex.replace(/\s+/g,'').toLowerCase();
+      if(hex.length % 2 !== 0) hex = '0'+hex;
+      const out = [];
+      for(let i=0;i<hex.length;i+=2){
+        const b = parseInt(hex.slice(i,i+2),16);
+        if(Number.isNaN(b)) return null;
+        out.push(b);
+      }
+      return new Uint8Array(out);
+    }
+    function base64ToBytes(b64){
+      try{
+        const bin = atob((b64||'').replace(/\s+/g,''));
+        const out = new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+        return out;
+      }catch(e){ return null; }
+    }
+    function bytesToHex(buf){ return [...buf].map(b=>b.toString(16).padStart(2,'0')).join(''); }
+    function bytesToBase64(bytes){ let s=''; for(let i=0;i<bytes.length;i++) s+=String.fromCharCode(bytes[i]); return btoa(s); }
+
+    function repeatKey(keyBytes, length){ const out=new Uint8Array(length); for(let i=0;i<length;i++) out[i]=keyBytes[i%keyBytes.length]; return out; }
+    function xorBytes(a,b){ const out=new Uint8Array(a.length); for(let i=0;i<a.length;i++) out[i]=a[i]^b[i]; return out; }
+
+    function asciiMeta(b){
+      const hex = '0x'+b.toString(16).padStart(2,'0');
+      const decv = b;
+      const printable = (b>=32 && b<=126);
+      const ascii = (b<=127);
+      const ch = printable ? String.fromCharCode(b) : '·'; // Punkt für nicht druckbar
+      const code = 'U+'+b.toString(16).padStart(4,'0').toUpperCase();
+      const title = ascii ? (printable? `ASCII ${decv} '${String.fromCharCode(b)}'` : `ASCII ${decv} (nicht druckbar)`) : `Byte ${decv} (Nicht-ASCII)`;
+      return {hex, dec: decv, ch, code, title};
+    }
+
+    function mkLine(label, val, kind){
+      const row = document.createElement('div');
+      const lab = document.createElement('div'); lab.textContent = label; lab.className = 'rowlabel';
+      const line = document.createElement('div'); line.className = 'bitline';
+      for(let b=7;b>=0;b--){
+        const bit = (val>>b)&1; const cell = document.createElement('div');
+        cell.className = 'bit ' + (kind==='xor'? 'xor' : (bit? 'b1':'b0')); cell.textContent = bit; line.appendChild(cell);
+      }
+      const m = asciiMeta(val);
+      const meta = document.createElement('div'); meta.className = 'meta small mono';
+      meta.innerHTML = `<span class="chip">${m.hex}</span><span class="chip">dec ${m.dec}</span><span class="chip" title="${m.title}">char ${m.ch}</span><span class="chip">${m.code}</span>`;
+      row.appendChild(lab);
+      const wrap = document.createElement('div'); wrap.appendChild(line); wrap.appendChild(meta); row.appendChild(wrap);
+      row.style.display='grid'; row.style.gridTemplateColumns='130px 1fr'; row.style.gap='10px';
+      return row;
+    }
+
+    function renderBits(Abytes, Kbytes, Cbytes, labels){
+      bits.innerHTML = '';
+      const n = Math.min(Abytes.length, BYTE_LIMIT);
+      for(let i=0;i<n;i++){
+        const a=Abytes[i], k=Kbytes[i], c=Cbytes[i];
+        const group=document.createElement('div'); group.className='group';
+        const head=document.createElement('div');
+        head.innerHTML = `<span class="tag mono">Byte ${i+1}</span> <span class="small">(${labels[0]} ${a.toString(16).padStart(2,'0')}, K ${k.toString(16).padStart(2,'0')}, ${labels[2]} ${c.toString(16).padStart(2,'0')})</span>`;
+        group.appendChild(head);
+        group.appendChild(mkLine(labels[0], a, 'pt'));
+        group.appendChild(mkLine('Schlüssel', k, 'key'));
+        group.appendChild(mkLine(labels[2]+' =', c, 'xor'));
+        bits.appendChild(group);
+      }
+      if(Abytes.length===0){ bits.innerHTML = '<div class="small">Gib oben Daten ein, um die Bits zu sehen.</div>'; }
+    }
+
+    function renderOutputEnc(ct){
+      outArea.innerHTML = `
+        <div class="grid2">
+          <div><div class="small">Ciphertext (Hex)</div><div id="outHex" class="mono" style="word-break:break-word"></div></div>
+          <div><div class="small">Ciphertext (Base64)</div><div id="outB64" class="mono" style="word-break:break-word"></div></div>
+        </div>`;
+      document.getElementById('outHex').textContent = bytesToHex(ct);
+      document.getElementById('outB64').textContent = bytesToBase64(ct);
+    }
+
+    function renderOutputDec(ptBytes){
+      outArea.innerHTML = `
+        <div class="grid2">
+          <div><div class="small">Klartext (UTF-8)</div><textarea id="outPT" class="mono" style="min-height:96px"></textarea></div>
+          <div><div class="small">Klartext (Hex)</div><div id="outPTHex" class="mono" style="word-break:break-word"></div></div>
+        </div>`;
+      try{ document.getElementById('outPT').value = dec.decode(ptBytes); }
+      catch{ document.getElementById('outPT').value = Array.from(ptBytes).map(b=>String.fromCharCode(b)).join(''); }
+      document.getElementById('outPTHex').textContent = bytesToHex(ptBytes);
+    }
+
+    function renderOutputKey(keyBytes){
+      outArea.innerHTML = `
+        <div class="grid2">
+          <div><div class="small">Ermittelter Schlüssel (UTF-8)</div><textarea id="outKeyTxt" class="mono" style="min-height:96px"></textarea></div>
+          <div><div class="small">Ermittelter Schlüssel (Hex)</div><div id="outKeyHex" class="mono" style="word-break:break-word"></div></div>
+        </div>`;
+      try{ document.getElementById('outKeyTxt').value = dec.decode(keyBytes); }
+      catch{ document.getElementById('outKeyTxt').value = Array.from(keyBytes).map(b=>String.fromCharCode(b)).join(''); }
+      document.getElementById('outKeyHex').textContent = bytesToHex(keyBytes);
+    }
+
+    function getKeyBytes(useHex, value){ return useHex ? hexToBytes(value||'') : enc.encode(value||''); }
+
+    function compute(){
+      const m = mode.value;
+      if(m==='enc'){
+        const ptBytes = enc.encode(pt.value||'');
+        const keyBytes = getKeyBytes(keyhex.checked, key.value);
+        if(keyBytes===null){ outArea.innerHTML='<div class="small">⚠️ Ungültiger Hex-Schlüssel.</div>'; bits.innerHTML=''; return; }
+        if(!keyBytes || keyBytes.length===0){ outArea.innerHTML='<div class="small">Bitte einen (nicht-leeren) Schlüssel eingeben.</div>'; bits.innerHTML=''; return; }
+        const repKey = repeatKey(keyBytes, ptBytes.length);
+        const ct = xorBytes(ptBytes, repKey);
+        renderOutputEnc(ct);
+        renderBits(ptBytes, repKey, ct, ['Klartext','Key','XOR']);
+      } else if(m==='dec'){
+        const ctBytes = ctHex.checked ? hexToBytes(ct.value||'') : base64ToBytes(ct.value||'');
+        if(ctBytes===null){ outArea.innerHTML='<div class="small">⚠️ Ungültiger Ciphertext.</div>'; bits.innerHTML=''; return; }
+        const keyBytes = getKeyBytes(keyhex2.checked, key2.value);
+        if(keyBytes===null){ outArea.innerHTML='<div class="small">⚠️ Ungültiger Hex-Schlüssel.</div>'; bits.innerHTML=''; return; }
+        if(!keyBytes || keyBytes.length===0){ outArea.innerHTML='<div class="small">Bitte einen (nicht-leeren) Schlüssel eingeben.</div>'; bits.innerHTML=''; return; }
+        const repKey = repeatKey(keyBytes, ctBytes.length);
+        const ptBytes = xorBytes(ctBytes, repKey);
+        renderOutputDec(ptBytes);
+        renderBits(ptBytes, repKey, ctBytes, ['Klartext','Key','Cipher']);
+      } else { // derive key (Kennwort ermitteln)
+        const ptBytes = enc.encode(pt3.value||'');
+        const ctBytes = ct3Hex.checked ? hexToBytes(ct3.value||'') : base64ToBytes(ct3.value||'');
+        if(ctBytes===null){ outArea.innerHTML='<div class="small">⚠️ Ungültiger Ciphertext.</div>'; bits.innerHTML=''; return; }
+        if(ptBytes.length!==ctBytes.length){ outArea.innerHTML='<div class="small">⚠️ PT und CT müssen gleich lang sein, damit Key = PT ⊕ CT gebildet werden kann.</div>'; bits.innerHTML=''; return; }
+        const keyDerived = xorBytes(ptBytes, ctBytes);
+        renderOutputKey(keyDerived);
+        renderBits(ptBytes, keyDerived, ctBytes, ['Klartext','Key','Cipher']);
+      }
+    }
+
+    function setMode(){
+      const m = mode.value;
+      document.getElementById('rowPT').style.display = (m==='enc') ? '' : 'none';
+      document.getElementById('rowCT').style.display = (m==='dec') ? '' : 'none';
+      document.getElementById('rowDerive').style.display = (m==='derive') ? '' : 'none';
+      compute();
+    }
+
+    ['input','change','keyup'].forEach(ev=>{
+      [pt,key,keyhex,ct,key2,keyhex2,ctHex,ctB64,pt3,ct3,ct3Hex,ct3B64,mode].forEach(el=> el && el.addEventListener(ev, compute));
+    });
+    mode.addEventListener('change', setMode);
+
+    document.getElementById('btnDemo').addEventListener('click', ()=>{
+      if(mode.value==='enc'){
+        pt.value='IT AN DER BAR'; key.value='NEON'; keyhex.checked=false;
+      }else if(mode.value==='dec'){
+        ct.value='07116f0f00650b0b1c650d0f1c'; ctHex.checked=true; key2.value='NEON'; keyhex2.checked=false;
+      }else{
+        pt3.value='HELLO'; ct3.value='1b000f0f04'; ct3Hex.checked=true;
+      }
+      compute();
+    });
+
+    document.getElementById('btnClear').addEventListener('click', ()=>{
+      [pt,key,ct,key2,pt3,ct3].forEach(el=> el && (el.value=''));
+      [keyhex,keyhex2,ctHex,ct3Hex].forEach(el=> el && (el.checked=true));
+      [ctB64,ct3B64].forEach(el=> el && (el.checked=false));
+      outArea.innerHTML=''; bits.innerHTML='';
+    });
+
+    document.getElementById('btnCopy').addEventListener('click', ()=>{
+      const m = mode.value;
+      if(m==='enc'){
+        const hex = (outArea.querySelector('#outHex')||{}).textContent||''; if(!hex.trim()) return; navigator.clipboard.writeText(hex.trim());
+      }else if(m==='dec'){
+        const ptv = (outArea.querySelector('#outPT')||{}).value||''; if(!ptv) return; navigator.clipboard.writeText(ptv);
+      }else{
+        const keyHex = (outArea.querySelector('#outKeyHex')||{}).textContent||''; if(!keyHex.trim()) return; navigator.clipboard.writeText(keyHex.trim());
+      }
+    });
+
+    setMode();
+  </script>
+</body>
+</html>
