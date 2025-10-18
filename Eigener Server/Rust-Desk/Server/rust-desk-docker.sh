@@ -9,6 +9,11 @@ IMAGE="rustdesk/rustdesk-server:latest"
 HBBS_NAME="rustdesk-hbbs"
 HBBR_NAME="rustdesk-hbbr"
 
+# Mindestports für RustDesk OSS
+REQ_TCP=(21115 21116 21117)   # hbbs/hbbr TCP
+REQ_UDP=(21116)               # hbbs UDP
+# Optional (Web-Client): 21118/tcp (WS zu hbbs), 21119/tcp (WS zu hbbr)
+
 # ==========================
 #  Farben/Format
 # ==========================
@@ -51,33 +56,106 @@ print_keys_hint(){
 }
 
 # ==========================
-#  Externe/Interne IP
+#  IP-Infos
 # ==========================
 get_external_ip(){
   local ip=""
-  if has_cmd dig; then
-    ip="$(dig +short myip.opendns.com @resolver1.opendns.com || true)"
-  fi
-  if [[ -z "$ip" ]] && has_cmd curl; then
-    ip="$(curl -fsS https://api.ipify.org || true)"
-  fi
-  if [[ -z "$ip" ]] && has_cmd wget; then
-    ip="$(wget -qO- https://api.ipify.org || true)"
-  fi
+  if has_cmd dig;   then ip="$(dig +short myip.opendns.com @resolver1.opendns.com || true)"; fi
+  if [[ -z "$ip" ]] && has_cmd curl; then ip="$(curl -fsS https://api.ipify.org || true)"; fi
+  if [[ -z "$ip" ]] && has_cmd wget; then ip="$(wget -qO- https://api.ipify.org || true)"; fi
   echo "$ip"
+}
+
+# Prüft, ob eine NIC eine echte Public-IP (kein RFC1918/CGNAT) trägt
+has_local_public_ip(){
+  local ips
+  ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)"
+  while read -r ip; do
+    [[ -z "$ip" ]] && continue
+    # private + CGNAT ausschließen
+    if ! [[ "$ip" =~ ^10\. || "$ip" =~ ^192\.168\. || "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. || "$ip" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]]; then
+      return 0
+    fi
+  done <<< "$ips"
+  return 1
 }
 
 show_ips(){
   bold "Netzwerk-Infos"
   local ext; ext="$(get_external_ip)"
   if [[ -n "$ext" ]]; then
-    echo "Externe IP: $ext"
+    echo "Externe IP (via Provider): $ext"
   else
     yellow "Externe IP konnte nicht ermittelt werden (Internet/Tools?). Installiere ggf. 'dnsutils' oder 'curl'."
   fi
   echo "Lokale IPs: $(hostname -I 2>/dev/null || echo 'unbekannt')"
   echo
-  echo "RustDesk-Clients: unter Einstellungen → Netzwerk die Server-Adresse auf diese IP setzen."
+  echo "RustDesk-Clients: in den Einstellungen → Netzwerk die Server-Adresse auf diese IP setzen."
+}
+
+# ==========================
+#  Firewall-Checks – iptables ONLY
+# ==========================
+# "aktiv" = iptables vorhanden und lesbar (auch wenn Policy ACCEPT ist)
+fw_any_active() {
+  has_cmd iptables && iptables -S >/dev/null 2>&1
+}
+
+# Liest die Default-Policy der INPUT-Chain (ACCEPT/DROP/REJECT)
+fw_policy_input() {
+  iptables -S 2>/dev/null | awk '$1=="-P" && $2=="INPUT"{print $3; exit}'
+}
+
+# Prüft, ob eine ACCEPT-Regel für proto/port irgendwo sichtbar ist
+# 1) exakte -C-Prüfung (direkt in INPUT)
+# 2) Fallback: heuristischer Check über alle Chains (nach "ACCEPT ... dpt:PORT")
+iptables_port_open() {
+  local proto="$1" port="$2"
+  # exakter Check (nur INPUT)
+  if iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
+    return 0
+  fi
+  # heuristischer Check (deckt auch Sprünge/benutzerdef. Chains ab)
+  iptables -nL 2>/dev/null | awk -v p="$port" -v pr="$proto" '
+    BEGIN{IGNORECASE=1}
+    $1=="ACCEPT" && tolower($0) ~ ("proto " pr) && $0 ~ ("dpt:" p){found=1}
+    END{exit(found?0:1)}
+  '
+}
+
+# Haupt-Check: bewertet, ob die Mindest-Ports offen sind
+# - Wenn iptables fehlt → "ok (keine FW)"
+# - Wenn Policy INPUT=ACCEPT → "ok (policy ACCEPT)"
+# - Sonst: prüfe erforderliche Ports
+firewall_ok() {
+  local missing=()
+
+  if ! fw_any_active; then
+    echo "ok (keine FW)"
+    return 0
+  fi
+
+  local policy; policy="$(fw_policy_input)"
+  if [[ "${policy^^}" == "ACCEPT" || -z "$policy" ]]; then
+    echo "ok (policy ACCEPT)"
+    return 0
+  fi
+
+  # Striktere Policies → Ports prüfen
+  for p in "${REQ_TCP[@]}"; do
+    iptables_port_open tcp "$p" || missing+=("${p}/tcp")
+  done
+  for p in "${REQ_UDP[@]}"; do
+    iptables_port_open udp "$p" || missing+=("${p}/udp")
+  done
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    echo "ok (iptables)"
+    return 0
+  else
+    echo "failed (fehlend: ${missing[*]})"
+    return 1
+  fi
 }
 
 # ==========================
@@ -178,7 +256,7 @@ delete_all(){
 }
 
 # ==========================
-#  CLI (weiterhin verfügbar)
+#  CLI
 # ==========================
 usage(){
   cat <<EOF
@@ -187,6 +265,7 @@ Benutzung: $0 <befehl>
 
 Befehle:
   deps | install | start | stop | restart | status | logs | upgrade | delete | ip | menu | help
+
 Beispiele:
   sudo $0 deps && sudo $0 install
   sudo $0 menu
@@ -198,20 +277,33 @@ EOF
 # ==========================
 render_menu(){
   clear
+  # Health-Hinweis vorbereiten
+  local pub_status fw_status fw_ok
+  if has_local_public_ip; then
+    pub_status="ja"
+  else
+    pub_status="nein (NAT beachten!)"
+  fi
+  fw_status="$(firewall_ok)"; fw_ok=$?
+
   bold "RustDesk Server – Menü"
   echo "Datenverzeichnis: $DATA_DIR"
+  echo -n "Hinweis: Public IP: "
+  if [[ "$pub_status" == "ja" ]]; then echo -n "${GREEN}ja${NORM}"; else echo -n "${YELLOW}nein (NAT beachten!)${NORM}"; fi
+  echo -n "   |   Firewall: "
+  if [[ $fw_ok -eq 0 ]]; then echo -n "${GREEN}${fw_status}${NORM}"; else echo -n "${RED}${fw_status}${NORM}"; fi
+  echo
   echo
 
   # Zustand ermitteln
-  local ex_hbbs ex_hbbr run_hbbs run_hbbr any_exists any_running
-  ex_hbbs=0; ex_hbbr=0; run_hbbs=0; run_hbbr=0
+  local ex_hbbs=0 ex_hbbr=0 run_hbbs=0 run_hbbr=0
   container_exists "$HBBS_NAME" && ex_hbbs=1
   container_exists "$HBBR_NAME" && ex_hbbr=1
   container_running "$HBBS_NAME" && run_hbbs=1
   container_running "$HBBR_NAME" && run_hbbr=1
-  any_exists=$(( ex_hbbs || ex_hbbr ))
-  any_running=$(( run_hbbs || run_hbbr ))
-  both_exist=$(( ex_hbbs && ex_hbbr ))
+  local any_exists=$(( ex_hbbs || ex_hbbr ))
+  local any_running=$(( run_hbbs || run_hbbr ))
+  local both_exist=$(( ex_hbbs && ex_hbbr ))
 
   # Enable/Disable Logik
   local en_deps=1
@@ -222,25 +314,27 @@ render_menu(){
   local en_status=1
   local en_logs=$(( any_exists ? 1 : 0 ))
   local en_upgrade=$(( any_exists ? 1 : 0 ))
-  local en_delete=$(( any_exists || -d "$DATA_DIR" ? 1 : 0 ))
+  local has_data_dir=0
+  [[ -d "$DATA_DIR" ]] && has_data_dir=1
+  local en_delete=$(( (any_exists || has_data_dir) ? 1 : 0 ))
   local en_ip=1
 
-  MENU_TEXT=( 
-    "Abhängigkeiten prüfen/installieren"  \
-    "Installieren (hbbs/hbbr anlegen)"     \
-    "Starten"                              \
-    "Stoppen"                              \
-    "Neustarten"                           \
-    "Status anzeigen"                      \
-    "Logs verfolgen"                       \
-    "Upgrade (neu ziehen & neu erstellen)" \
-    "Löschen (Container, optional Daten)"  \
-    "Externe IP anzeigen"                  \
-    "Beenden"                              )
-  MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_ip 1 )
-  MENU_CMD=( deps install start stop restart status logs upgrade delete ip quit )
+  local MENU_TEXT=( 
+    "Abhängigkeiten prüfen/installieren"
+    "Installieren (hbbs/hbbr anlegen)"
+    "Starten"
+    "Stoppen"
+    "Neustarten"
+    "Status anzeigen"
+    "Logs verfolgen"
+    "Upgrade (neu ziehen & neu erstellen)"
+    "Löschen (Container, optional Daten)"
+    "Externe IP anzeigen"
+    "Beenden"
+  )
+  local MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_ip 1 )
+  local MENU_CMD=( deps install start stop restart status logs upgrade delete ip quit )
 
-  # Ausgabe mit Farben
   local i
   for ((i=0;i<${#MENU_TEXT[@]};i++)); do
     local idx=$((i+1))
@@ -260,7 +354,33 @@ menu_loop(){
     [[ -z "${choice:-}" ]] && continue
     if ! [[ "$choice" =~ ^[0-9]+$ ]]; then red "Bitte eine Zahl wählen."; sleep 1; continue; fi
     local idx=$((choice-1))
-    if (( idx < 0 || idx >= ${#MENU_TEXT[@]} )); then red "Ungültige Auswahl."; sleep 1; continue; fi
+    if (( idx < 0 || idx >= 11 )); then red "Ungültige Auswahl."; sleep 1; continue; fi
+
+    # Arrays wie in render_menu()
+    local MENU_CMD=( deps install start stop restart status logs upgrade delete ip quit )
+
+    # Zustand neu evaluieren (Enable/Disable aktuell halten)
+    local ex_hbbs=0 ex_hbbr=0 run_hbbs=0 run_hbbr=0
+    container_exists "$HBBS_NAME" && ex_hbbs=1
+    container_exists "$HBBR_NAME" && ex_hbbr=1
+    container_running "$HBBS_NAME" && run_hbbs=1
+    container_running "$HBBR_NAME" && run_hbbr=1
+    local any_exists=$(( ex_hbbs || ex_hbbr ))
+    local any_running=$(( run_hbbs || run_hbbr ))
+    local both_exist=$(( ex_hbbs && ex_hbbr ))
+    local en_deps=1
+    local en_install=$(( both_exist ? 0 : 1 ))
+    local en_start=$(( any_exists && ! any_running ? 1 : 0 ))
+    local en_stop=$(( any_running ? 1 : 0 ))
+    local en_restart=$(( any_exists ? 1 : 0 ))
+    local en_status=1
+    local en_logs=$(( any_exists ? 1 : 0 ))
+    local en_upgrade=$(( any_exists ? 1 : 0 ))
+    local has_data_dir=0
+    [[ -d "$DATA_DIR" ]] && has_data_dir=1
+    local en_delete=$(( (any_exists || has_data_dir) ? 1 : 0 ))
+    local en_ip=1
+    local MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_ip 1 )
 
     if [[ "${MENU_EN[$idx]}" -ne 1 ]]; then
       yellow "Diese Option ist aktuell nicht sinnvoll/verfügbar."
