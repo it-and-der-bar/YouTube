@@ -23,7 +23,7 @@ HBBR_NAME="rustdesk-hbbr"
 
 # Externe Firewall-Konfiguration (relativ zur Skriptdatei)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXT_FW_SCRIPT="${SCRIPT_DIR}/../Firewall-Config/firewall-config.sh"
+EXT_FW_SCRIPT="${SCRIPT_DIR}/../../Firewall-Config/firewall-config.sh"
 
 # Mindestports für RustDesk OSS
 REQ_TCP=(21115 21116 21117)   # hbbs/hbbr TCP
