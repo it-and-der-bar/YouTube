@@ -204,6 +204,13 @@ spec:
               protocol: UDP
             - containerPort: 21118
               protocol: TCP
+        - name: toolbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: data
+              mountPath: /root
         - name: hbbr
           image: rustdesk/rustdesk-server:latest
           args: ["hbbr"]
@@ -236,10 +243,39 @@ k8s_apply(){
   green "Kubernetes-Deployment angewendet."
 }
 
+k8s_print_pubkey(){
+  local pod pk
+  if ! has_kube; then return 0; fi
+
+  pod="$(kubectl -n "$KNS" get pods -l app=rustdesk-server \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -z "$pod" ]] && { yellow "Kein Pod gefunden (Namespace ${KNS})."; return 0; }
+
+  # Mögliche Pfade – Hauptpfad zuerst
+  local paths=(
+    "/root/id_ed25519.pub"
+    "/root/.config/rustdesk/id_ed25519.pub"
+    "/root/.config/rustdesk/keys/id_ed25519.pub"
+  )
+
+  for p in "${paths[@]}"; do
+    pk="$(kubectl -n "$KNS" exec "$pod" -c toolbox -- sh -c "cat '$p' 2>/dev/null" || true)"
+    if [[ -n "$pk" ]]; then
+      bold "RustDesk Public Key (aus ${pod}:toolbox:$p):"
+      echo "$pk"
+      return 0
+    fi
+  done
+
+  yellow "Kein Public Key gefunden. Warte, bis hbbs einmal gestartet hat und den Key ins Volume schreibt."
+  return 0
+}
 k8s_status(){
   if ! has_kube; then yellow "Kubernetes nicht verfügbar."; return 0; fi
   bold "Status (Namespace ${KNS}):"
   kubectl -n "$KNS" get deploy,po,pvc 2>/dev/null || true
+  echo
+  k8s_print_pubkey
 }
 
 k8s_delete(){
