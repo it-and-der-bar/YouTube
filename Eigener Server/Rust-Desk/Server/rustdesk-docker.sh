@@ -76,7 +76,6 @@ print_keys_hint(){
 # ==========================
 get_external_ip(){
   local ip=""
-  if has_cmd dig;   then ip="$(dig +short myip.opendns.com @resolver1.opendns.com || true)"; fi
   if [[ -z "$ip" ]] && has_cmd curl; then ip="$(curl -fsS https://api.ipify.org || true)"; fi
   if [[ -z "$ip" ]] && has_cmd wget; then ip="$(wget -qO- https://api.ipify.org || true)"; fi
   echo "$ip"
