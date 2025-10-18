@@ -4,3 +4,5 @@ ScreenY/web-app/configs/
 ScreenY/web-app/playlists/
 __pycache__
 Eigener Server/Rust-Desk/Client/my-ressources/
+Eigener Server/Rust-Desk/Client/build-it.ps1
+Eigener Server/Rust-Desk/Client/bin-cache/win64/sciter.dll

@@ -17,6 +17,10 @@ function Ok  ([string]$m){ Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn([string]$m){ Write-Host "[!!] $m" -ForegroundColor Yellow }
 function Fail([string]$m){ Write-Host "[XX] $m" -ForegroundColor Red; exit 1 }
 
+function Test-IsAdmin {
+    $p = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 # =================== preflight ===================
 function Get-Inputs {
   if (-not $script:AppName)          { $script:AppName          = Read-Host "App-Name (z.B. my client)" }
@@ -39,6 +43,133 @@ function Get-Inputs {
   if (-not (Test-Path $NsisScript)) { Fail ("NSIS-Script fehlt: {0}" -f $NsisScript) } else { Ok ("NSIS-Script: {0}" -f $NsisScript) }
 }
 
+#NTFS Check
+function Get-FilesystemType {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try { $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path }
+    catch { $resolved = $Path }
+
+    $driveRoot = [System.IO.Path]::GetPathRoot($resolved)
+    if ($driveRoot -match '^[A-Za-z]:\\$') {
+        $drv = $driveRoot.Substring(0,1)
+        $vol = Get-Volume -DriveLetter $drv -ErrorAction SilentlyContinue
+        if ($vol) { return $vol.FileSystem }
+        # Fallback (aeltere PS-Versionen)
+        $info = (fsutil fsinfo volumeinfo $driveRoot 2>$null)
+        if ($info) {
+            $line = $info | Select-String 'File System Name'
+            if ($line) { return ($line -split ':')[-1].Trim() }
+        }
+    }
+    return 'Unknown'
+}
+
+function Ensure-RootOnNtfs {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Root)
+
+    Say "pruefe Dateisystem fuer: $Root"
+    if (-not (Test-Path -LiteralPath $Root)) {
+        Warn "Pfad existiert nicht: $Root"
+        return $false
+    }
+
+    $fs = Get-FilesystemType -Path $Root
+    if ($fs -eq 'NTFS') {
+        Ok "'$Root' liegt auf NTFS."
+        return $true
+    } else {
+        Warn "'$Root' liegt auf $fs (nicht NTFS)."
+        return $false
+    }
+}
+
+# Handling ASLR
+function Test-And-Handle-ASLR {
+    [CmdletBinding()]
+    param(
+        [switch]$AutoDisable,
+        [switch]$Quiet
+    )
+
+    if (-not $Quiet) { Say 'reading system mitigations (ASLR)...' }
+
+    try {
+        $sys = Get-ProcessMitigation -System
+    } catch {
+        Fail 'Cmdlet Get-ProcessMitigation not available. Run PowerShell as Administrator on Windows 10/11.'
+    }
+
+    $aslr = $sys.ASLR
+
+    $on = @{}
+    foreach ($k in 'BottomUp','HighEntropy','ForceRelocateImages') {
+        $val = $aslr.$k
+        if     ($val -is [string]) { $on[$k] = ($val -eq 'ON') }
+        elseif ($val -is [bool])   { $on[$k] = $val }
+        else                       { $on[$k] = $false }
+    }
+
+    $anyOn = $on.Values -contains $true
+
+    if (-not $Quiet) {
+        Say ("ASLR status: BottomUp={0}  HighEntropy={1}  ForceRelocateImages={2}" -f $aslr.BottomUp,$aslr.HighEntropy,$aslr.ForceRelocateImages)
+        if ($anyOn) { Warn 'ASLR ist AN.' }
+        else        { Ok 'ASLR ist AUS.'; return 0 }
+    } else {
+        if (-not $anyOn) { return 0 }
+    }
+
+    if ($AutoDisable) {
+        if (-not (Test-IsAdmin)) { Fail 'Powershell muss als Admin ausgefuehrt werden.' }
+        return (Disable-ASLR -Quiet:$Quiet)
+    }
+
+    if ($Quiet) { return 1 }
+
+    $ans = Read-Host 'ASLR deaktivieren (Bei Error: Problem extracting tar - kann deaktieren helfen)? (j/N)'
+    if ($ans -match '^(y|j)') {
+        if (-not (Test-IsAdmin)) { Fail 'Powershell muss als Admin ausgefuehrt werden.' }
+        return (Disable-ASLR -Quiet:$Quiet)
+    } else {
+        Say 'ASLR bleibt an.'
+        return 1
+    }
+}
+
+function Disable-ASLR {
+    [CmdletBinding()]
+    param([switch]$Quiet)
+
+    if (-not (Test-IsAdmin)) { Fail 'Powershell muss als Admin ausgefuehrt werden.' }
+
+    if (-not $Quiet) { Say 'ASLR (BottomUp, HighEntropy, ForceRelocateImages) system-weit deaktivieren...' }
+    try {
+        Set-ProcessMitigation -System -Disable BottomUp,HighEntropy,ForceRelocateImages
+    } catch {
+        Fail ("Set-ProcessMitigation failed: {0}" -f $_.Exception.Message)
+    }
+    if (-not $Quiet) { Ok 'ASLR deaktiviert. Neustart notwendig!' }
+    return 0
+}
+
+function Reset-ASLR-ToDefault {
+    [CmdletBinding()]
+    param([switch]$Quiet)
+
+    if (-not (Test-IsAdmin)) { Fail 'Powershell muss als Admin ausgefuehrt werden.' }
+
+    if (-not $Quiet) { Say 'resetting ASLR Konfiguration...' }
+    try {
+        Set-ProcessMitigation -System -Remove -Disable BottomUp,HighEntropy,ForceRelocateImages
+    } catch {
+        Fail ("Set-ProcessMitigation (reset) fehlgeschlagen: {0}" -f $_.Exception.Message)
+    }
+    if (-not $Quiet) { Ok 'ASLR auf Standard. Neustart notwendig!' }
+    return 0
+}
+
 # =================== tools ===================
 function Ensure-Git {
   if (Get-Command git -ErrorAction SilentlyContinue) { Ok 'Git gefunden.'; return }
@@ -49,30 +180,165 @@ function Ensure-Git {
 }
 
 function Find-Vcvars {
-  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-  $vc = $null
-  if (Test-Path $vswhere) {
-    $vc = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvarsall.bat' 2>$null | Select-Object -First 1
+  function _probe {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $vc = $null
+    if (Test-Path $vswhere) {
+      $vc = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvarsall.bat' 2>$null | Select-Object -First 1
+    }
+    if (-not $vc) {
+      $candidates = @(
+        'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat',
+        'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat',
+        'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat',
+        'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat',
+        'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat',
+        'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat'
+      )
+      $vc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+    return $vc
   }
+
+  $vc = _probe
+  if ($vc) {
+    $script:Vcvars = $vc
+    Ok ("vcvarsall gefunden: {0}" -f $Vcvars)
+    return
+  }
+
+  Warn 'vcvarsall.bat nicht gefunden (VS 2022 C++ Build Tools fehlen).'
+  $answer = Read-Host 'Jetzt die Visual Studio 2022 Build Tools (C++ Toolchain, Win10 SDK, CMake) installieren? (J/N)'
+  if ($answer -notin @('J','j','Y','y','Ja','ja','Yes','yes')) {
+    Fail 'Abgebrochen. Bitte VS 2022 C++ Build Tools manuell installieren.'
+  }
+
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Fail 'winget ist nicht verfuegbar. Bitte winget installieren/aktivieren und erneut versuchen.'
+  }
+
+  Say 'Installiere Microsoft.VisualStudio.2022.BuildTools mit erforderlichen Komponenten (dies kann eine Weile dauern)...'
+  $override = '--add Microsoft.VisualStudio.Workload.VCTools ' +
+              '--add Microsoft.VisualStudio.Component.Windows10SDK.19041 ' +
+              '--add Microsoft.VisualStudio.Component.VC.CMake.Project ' +
+              '--includeRecommended --passive --norestart'
+
+  $args = @(
+    'install',
+    '--id','Microsoft.VisualStudio.2022.BuildTools',
+    '-e',
+    '--source','winget',
+    '--accept-package-agreements',
+    '--accept-source-agreements',
+    '--override', "`"$override`""
+  )
+
+  $p = Start-Process -FilePath 'winget' -ArgumentList ($args -join ' ') -Wait -PassThru -NoNewWindow
+  if ($p.ExitCode -ne 0) {
+    Fail ("Installation der Build Tools fehlgeschlagen (ExitCode {0})." -f $p.ExitCode)
+  }
+  Ok 'Build Tools installiert. Suche vcvarsall erneut...'
+
+  $vc = _probe
   if (-not $vc) {
-    $candidates = @(
-      'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat',
-      'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat',
-      'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat',
-      'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat',
-      'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat',
-      'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat'
-    )
-    $vc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    Fail 'vcvarsall.bat weiterhin nicht gefunden. Starte eine neue PowerShell als Administrator und versuche es erneut.'
   }
-  if (-not $vc) { Fail 'vcvarsall.bat nicht gefunden. Bitte VS 2022 C++ Build Tools installieren.' }
+
   $script:Vcvars = $vc
   Ok ("vcvarsall gefunden: {0}" -f $Vcvars)
 }
 
+# erwartet: Say/Ok/Warn/Fail sind bereits definiert
+function Ensure-RustToolchain {
+
+    function Test-Cargo {
+        $c = Get-Command cargo -ErrorAction SilentlyContinue
+        if ($c) { Ok ("cargo gefunden: {0}" -f $c.Source); return $true }
+        return $false
+    }
+
+    if (Test-Cargo) { return }
+
+    # 1) winget versuchen (mehrere Paket-IDs, user-scope, silent)
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Say "installiere Rust via winget..."
+        $ids = @(
+            "Rustlang.Rustup",      # rustup bootstrap
+            "Rustlang.Rust.MSVC",   # üblicher MSVC-Toolchain
+            "Rustlang.Rust.GNU"     # GNU-Toolchain (Fallback)
+        )
+        foreach ($id in $ids) {
+            Say ("winget install --id {0} ..." -f $id)
+            try {
+                $args = @(
+                    "install","--id",$id,"--exact","--source","winget",
+                    "--accept-source-agreements","--accept-package-agreements"
+                )
+                $p = Start-Process -FilePath "winget" -ArgumentList $args -NoNewWindow -PassThru -Wait
+                if ($p.ExitCode -eq 0) {
+                    # PATH der aktuellen Session ergänzen (rustup legt unter %USERPROFILE%\.cargo\bin ab)
+                    $cargoBin = Join-Path $HOME ".cargo\bin"
+                    if (Test-Path $cargoBin) { $env:Path = "$cargoBin;$env:Path" }
+                    if (Test-Cargo) { return }
+                }
+            } catch { Warn ("winget fehlgeschlagen für {0}: {1}" -f $id, $_.Exception.Message) }
+        }
+        Fail "winget konnte Rust nicht bereitstellen."
+    } else {
+        Fail "winget nicht verfügbar."
+    }
+}
+
+function Ensure-Perl {
+
+    # Bereits vorhanden?
+    $perlCmd = Get-Command perl -ErrorAction SilentlyContinue
+    if ($perlCmd) {
+        $env:VCPKG_PERL_PATH = $perlCmd.Source
+        Write-Host "Perl bereits vorhanden: $($perlCmd.Source)"
+        return $perlCmd.Source
+    }
+
+    # winget verfuegbar?
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget ist nicht verfuegbar. Bitte zuerst winget installieren/aktivieren."
+    }
+    Warn("Perl nicht gefunden - installiere Strawberry Perl via winget ...")
+    winget install --id StrawberryPerl.StrawberryPerl 
+
+    # Versuch, perl zu finden (PATH kann fuer die aktuelle Session noch nicht aktualisiert sein)
+    $perlCmd = Get-Command perl -ErrorAction SilentlyContinue
+    if (-not $perlCmd) {
+        # Haeufige Installationspfade pruefen und temporaer in PATH aufnehmen
+        $candidates = @(
+            "$env:LOCALAPPDATA\Programs\Strawberry\perl\bin\perl.exe",
+            "C:\Strawberry\perl\bin\perl.exe"
+        )
+        foreach ($p in $candidates) {
+            if (Test-Path $p) {
+				$env:Path = ('{0};{1}' -f (Split-Path $p), $env:Path)
+                #$env:Path = "$(Split-Path $p);$env:Path"
+                $perlCmd = Get-Command perl -ErrorAction SilentlyContinue
+                if ($perlCmd) { break }
+            }
+        }
+    }
+
+    if (-not $perlCmd) {
+        Fail("Perl wurde nach der Installation nicht gefunden. Bitte Terminal neu oeffnen und erneut versuchen.", 11)
+    }
+
+    $env:VCPKG_PERL_PATH = $perlCmd.Source
+    Ok ("Perl bereit: $($perlCmd.Source)")
+    return $perlCmd.Source
+}
+
+
+
 function Ensure-LLVM {
   if (Test-Path (Join-Path $LlvmBin 'libclang.dll')) { Ok ("LLVM/libclang: {0}" -f $LlvmBin) }
-  else { Fail ("LLVM (libclang.dll) fehlt unter: {0}" -f $LlvmBin) }
+  else { Fail ("LLVM (libclang.dll) fehlt unter: {0} 
+Installer: https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.2/LLVM-15.0.2-win64.exe" -f $LlvmBin) }
 }
 
 function Ensure-SciterDll {
@@ -180,7 +446,7 @@ function Generate-ResourcesFromLogo {
   }
 
   function New-IcoFromPngs([string]$outPath, [string[]]$pngPaths) {
-    # schreibt eine .ico Datei mit PNG-kodierten Einträgen (Vista+)
+    # schreibt eine .ico Datei mit PNG-kodierten Eintraegen (Vista+)
     $streams = @()
     try {
       foreach ($p in $pngPaths) {
@@ -200,7 +466,7 @@ function Generate-ResourcesFromLogo {
         $bw.Write([UInt16]1)      # Type = 1 (icon)
         $bw.Write([UInt16]$count) # Count
 
-        # Platzhalter für ICONDIRENTRYs merken
+        # Platzhalter fuer ICONDIRENTRYs merken
         $entriesPos = $fs.Position
         for ($i=0; $i -lt $count; $i++) {
           # 16 Bytes pro Eintrag
@@ -418,8 +684,12 @@ function Run-CmdScript {
 
 # =================== main ===================
 Get-Inputs
+Ensure-RootOnNtfs -Root $Root
+Test-And-Handle-ASLR
 Ensure-NSIS
 Ensure-LLVM
+#Ensure-Perl
+Ensure-RustToolchain
 Find-Vcvars
 Ensure-Vcpkg
 Clone-RustDesk
