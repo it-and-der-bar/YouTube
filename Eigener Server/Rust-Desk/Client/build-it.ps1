@@ -23,7 +23,7 @@ function Test-IsAdmin {
 }
 # =================== preflight ===================
 function Get-Inputs {
-  if (-not $script:AppName)          { $script:AppName          = Read-Host "App-Name (z.B. my client)" }
+  if (-not $script:AppName)          { $script:AppName          = Read-Host "App-Name (z.B. my-client)" }
   if (-not $script:RendezvousServer) { $script:RendezvousServer = Read-Host "Rendezvous-Server (z.B. rustdesk.example.tld)" }
   if (-not $script:RsPubKey)         { $script:RsPubKey         = Read-Host "RS_PUB_KEY" }
 
@@ -421,6 +421,38 @@ function Patch-Config {
   Ok 'config.rs aktualisiert.'
 }
 
+
+function Patch-NSIS {
+
+    if (-not (Test-Path -LiteralPath $NsisScript)) {
+        Fail ("NSIS-Datei nicht gefunden: {0}" -f $NsisScript)
+    }
+
+    $app = $AppName.Replace('"','\"') 
+    $stem = ($AppName -replace '[^A-Za-z0-9._-]','-') -replace '-{2,}','-'
+    $stem = $stem.Trim('-'); if ([string]::IsNullOrWhiteSpace($stem)) { $stem = 'app' }
+    $exe  = "$stem.exe"
+
+    $repDefine = '!define APPNAME "' + $app + '"'
+    $repOut    = 'OutFile "' + $exe + '"'
+    $repFD     = 'VIAddVersionKey "FileDescription" "RustDesk ' + $app + '"'
+    $repPN     = 'VIAddVersionKey "ProductName"     "RustDesk"'
+
+    Say ("patch NSIS: {0}" -f $NsisScript)
+    $txt = Get-Content -LiteralPath $NsisScript -Raw
+
+    $txt = [regex]::Replace($txt, '(?m)^\s*!define\s+APPNAME\s+.*$',                     $repDefine)
+    $txt = [regex]::Replace($txt, '(?m)^\s*OutFile\s+.*$',                               $repOut)
+    $txt = [regex]::Replace($txt, '(?m)^\s*VIAddVersionKey\s+"FileDescription"\s+.*$',   $repFD)
+    $txt = [regex]::Replace($txt, '(?m)^\s*VIAddVersionKey\s+"ProductName"\s+.*$',       $repPN)
+
+    Set-Content -LiteralPath $NsisScript -Value $txt -Encoding UTF8
+    Ok ("NSIS aktualisiert. OutFile -> {0}" -f $exe)
+    return $exe
+}
+
+
+
 function Generate-ResourcesFromLogo {
   if (-not (Test-Path $MyResDir)) { New-Item -ItemType Directory -Path $MyResDir -Force | Out-Null }
 
@@ -694,6 +726,7 @@ Find-Vcvars
 Ensure-Vcpkg
 Clone-RustDesk
 Patch-Config
+Patch-NSIS
 Generate-ResourcesFromLogo
 Patch-IconBase64
 Copy-Resources

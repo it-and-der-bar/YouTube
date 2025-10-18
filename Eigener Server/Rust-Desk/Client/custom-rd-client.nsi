@@ -1,18 +1,17 @@
-!define APPNAME "My Remote Client"
+﻿!define APPNAME ""
 !define TMPDIR  "$TEMP\\${APPNAME}_$PID"
 !define SRCDIR  "rustdesk\pkg"
 !define LOGFILE "$TEMP\\${APPNAME}_run.log"
 
 RequestExecutionLevel user
-OutFile "My-Remote-Client.exe"
+OutFile "app.exe"
 
 
 !define MUI_ICON "my-ressources/_icon.ico"
 !define MUI_UNICON "my-ressources/icon.ico"
 Icon "my-ressources/icon.ico"
 UninstallIcon "my-ressources/icon.ico"
-
-VIAddVersionKey "FileDescription" "RustDesk My-Edition"
+VIAddVersionKey "FileDescription" "RustDesk "
 VIAddVersionKey "ProductName"     "RustDesk"
 VIAddVersionKey "CompanyName"     ""
 VIAddVersionKey "LegalCopyright"  "free to use"
@@ -39,13 +38,14 @@ Section
   File /r "${SRCDIR}\*.*"
   FileWrite $9 "Extracted payload.$\r$\n"
 
-  ; Ausführen (Working-Dir = TMP)
+  ; AusfÃ¼hren (Working-Dir = TMP)
   FileWrite $9 "Launching: ${TMPDIR}\rustdesk.exe$\r$\n"
   ExecWait '"${TMPDIR}\rustdesk.exe"' $ExitCode
   FileWrite $9 "rustdesk exited with code: $ExitCode$\r$\n"
 
-  ; Aufräumen (nur wenn nicht im Debug)
+  ; AufrÃ¤umen (nur wenn nicht im Debug)
   RMDir /r "${TMPDIR}"
   FileWrite $9 "Cleanup done.$\r$\n"
   FileClose $9
 SectionEnd
+
