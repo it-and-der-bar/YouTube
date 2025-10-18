@@ -12,7 +12,6 @@ else
 fi
 echo "----------------------------------------"
 
-
 # ==========================
 #  Einstellungen
 # ==========================
@@ -25,6 +24,10 @@ KPVC_NAME="rustdesk-data"           # PVC Name
 KPVC_SIZE="1Gi"                     # PVC Größe
 KDIR="/opt/rustdesk-server/k8s"     # Ablagepfad für YAML
 KFILE="${KDIR}/rustdesk.yaml"
+
+# Externe Firewall-Konfiguration (relativ zum Skript)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXT_FW_SCRIPT="${SCRIPT_DIR}/../Firewall-Config/firewall-config.sh"
 
 # Mindestports für RustDesk OSS (Firewall-Check)
 REQ_TCP=(21115 21116 21117)         # TCP hbbs/hbbr
@@ -95,19 +98,30 @@ show_ips(){
 }
 
 # ==========================
-#  Firewall-Check – iptables only
+#  Firewall-Check – iptables only (set -e-sicher)
 # ==========================
 fw_any_active(){ has_cmd iptables && iptables -S >/dev/null 2>&1; }
 fw_policy_input(){ iptables -S 2>/dev/null | awk '$1=="-P" && $2=="INPUT"{print $3; exit}'; }
 
 iptables_port_open(){
   local proto="$1" port="$2"
-  if iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then return 0; fi
-  iptables -nL 2>/dev/null | awk -v p="$port" -v pr="$proto" '
-    BEGIN{IGNORECASE=1}
-    $1=="ACCEPT" && tolower($0) ~ ("proto " pr) && $0 ~ ("dpt:" p){found=1}
-    END{exit(found?0:1)}
-  '
+
+  # 1) exakter Check in INPUT
+  if iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
+    return 0
+  fi
+
+  # 2) heuristischer Check – in if-Block, damit set -e nicht abbricht
+  if iptables -nL 2>/dev/null | awk -v p="$port" -v pr="$proto" '
+      BEGIN{IGNORECASE=1}
+      $1=="ACCEPT" && tolower($0) ~ ("proto " pr) && $0 ~ ("dpt:" p){found=1}
+      END{exit(found?0:1)}
+    '
+  then
+    return 0
+  fi
+
+  return 1
 }
 
 firewall_ok(){
@@ -123,7 +137,6 @@ firewall_ok(){
 # ==========================
 #  k3s / Kubernetes
 # ==========================
-
 check_deps(){
   bold "Abhängigkeiten prüfen…"
   if has_kube; then
@@ -266,25 +279,38 @@ EOF
 # ==========================
 #  Menü
 # ==========================
+run_ext_fw(){
+  if [[ -x "$EXT_FW_SCRIPT" ]]; then
+    "$EXT_FW_SCRIPT"
+  elif [[ -f "$EXT_FW_SCRIPT" ]]; then
+    bash "$EXT_FW_SCRIPT"
+  else
+    yellow "Externe Firewall-Konfiguration nicht gefunden: $EXT_FW_SCRIPT"
+  fi
+}
+
 render_menu(){
   clear
-  local pub iptxt fwtxt fw_ok
+  local pub iptxt fwtxt fw_rc
   if has_local_public_ip; then pub="ja"; else pub="nein (NAT beachten!)"; fi
   iptxt="$(get_external_ip)"
-  fwtxt="$(firewall_ok)"; fw_ok=$?
+
+  # WICHTIG: nicht an set -e scheitern, wenn firewall_ok != 0
+  fw_rc=0
+  fwtxt="$(firewall_ok)" || fw_rc=$?
 
   bold "RustDesk – Kubernetes Menü"
   echo -n "Hinweis: Public IP: "
   if [[ "$pub" == "ja" ]]; then echo -n "${GREEN}ja${NORM}"; else echo -n "${YELLOW}nein (NAT beachten!)${NORM}"; fi
   echo -n "   |   Firewall: "
-  if [[ $fw_ok -eq 0 ]]; then echo -n "${GREEN}${fwtxt}${NORM}"; else echo -n "${RED}${fwtxt}${NORM}"; fi
+  if [[ $fw_rc -eq 0 ]]; then echo -n "${GREEN}${fwtxt}${NORM}"; else echo -n "${RED}${fwtxt}${NORM}"; fi
   echo -n "   |   Kubernetes: "
   if has_kube; then echo -n "${GREEN}verfügbar${NORM}"; else echo -n "${RED}nicht verfügbar${NORM}"; fi
   echo
   [[ -n "$iptxt" ]] && echo "Externe IP: $iptxt"
   echo
 
-  echo -e " ${BOLD}1)${NORM} ${GREEN}Abhängigkeiten prüfen / k3s installieren${NORM}"
+  echo -e " ${BOLD}1)${NORM} ${GREEN}Abhängigkeiten prüfen / k3s prüfen${NORM}"
   if has_kube; then
     echo -e " ${BOLD}2)${NORM} ${GREEN}Deploy anwenden${NORM}"
     echo -e " ${BOLD}3)${NORM} ${GREEN}Status anzeigen${NORM}"
@@ -294,8 +320,14 @@ render_menu(){
     echo -e " ${BOLD}3)${NORM} ${GREY}Status anzeigen (nicht verfügbar)${NORM}"
     echo -e " ${BOLD}4)${NORM} ${GREY}Löschen (nicht verfügbar)${NORM}"
   fi
-  echo -e " ${BOLD}5)${NORM} ${GREEN}IP-Infos anzeigen${NORM}"
-  echo -e " ${BOLD}6)${NORM} Beenden"
+
+  if [[ -f "$EXT_FW_SCRIPT" ]]; then
+    echo -e " ${BOLD}5)${NORM} ${GREEN}Firewall-Konfiguration starten${NORM}"
+    echo -e " ${BOLD}6)${NORM} Beenden"
+  else
+    echo -e " ${BOLD}5)${NORM} ${GREEN}IP-Infos anzeigen${NORM}"
+    echo -e " ${BOLD}6)${NORM} Beenden"
+  fi
   echo
 }
 
@@ -308,7 +340,14 @@ menu_loop(){
       2) has_kube && k8s_apply || yellow "Nicht verfügbar – bitte erst k3s installieren."; pause ;;
       3) has_kube && k8s_status || yellow "Nicht verfügbar – bitte erst k3s installieren."; pause ;;
       4) has_kube && k8s_delete || yellow "Nicht verfügbar – bitte erst k3s installieren."; pause ;;
-      5) show_ips; pause ;;
+      5)
+         if [[ -f "$EXT_FW_SCRIPT" ]]; then
+           run_ext_fw
+         else
+           show_ips
+         fi
+         pause
+         ;;
       6) break ;;
       *) red "Ungültige Auswahl."; sleep 1 ;;
     esac

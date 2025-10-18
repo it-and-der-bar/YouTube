@@ -21,6 +21,10 @@ IMAGE="rustdesk/rustdesk-server:latest"
 HBBS_NAME="rustdesk-hbbs"
 HBBR_NAME="rustdesk-hbbr"
 
+# Externe Firewall-Konfiguration (relativ zur Skriptdatei)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXT_FW_SCRIPT="${SCRIPT_DIR}/../Firewall-Config/firewall-config.sh"
+
 # Mindestports für RustDesk OSS
 REQ_TCP=(21115 21116 21117)   # hbbs/hbbr TCP
 REQ_UDP=(21116)               # hbbs UDP
@@ -106,40 +110,33 @@ show_ips(){
 }
 
 # ==========================
-#  Firewall-Checks – iptables ONLY
+#  Firewall-Checks – iptables ONLY (set -e-sicher)
 # ==========================
 # "aktiv" = iptables vorhanden und lesbar (auch wenn Policy ACCEPT ist)
-fw_any_active() {
-  has_cmd iptables && iptables -S >/dev/null 2>&1
-}
+fw_any_active(){ has_cmd iptables && iptables -S >/dev/null 2>&1; }
 
 # Liest die Default-Policy der INPUT-Chain (ACCEPT/DROP/REJECT)
-fw_policy_input() {
-  iptables -S 2>/dev/null | awk '$1=="-P" && $2=="INPUT"{print $3; exit}'
-}
+fw_policy_input(){ iptables -S 2>/dev/null | awk '$1=="-P" && $2=="INPUT"{print $3; exit}'; }
 
 # Prüft, ob eine ACCEPT-Regel für proto/port irgendwo sichtbar ist
-# 1) exakte -C-Prüfung (direkt in INPUT)
-# 2) Fallback: heuristischer Check über alle Chains (nach "ACCEPT ... dpt:PORT")
-iptables_port_open() {
+iptables_port_open(){
   local proto="$1" port="$2"
   # exakter Check (nur INPUT)
   if iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
     return 0
   fi
-  # heuristischer Check (deckt auch Sprünge/benutzerdef. Chains ab)
-  iptables -nL 2>/dev/null | awk -v p="$port" -v pr="$proto" '
-    BEGIN{IGNORECASE=1}
-    $1=="ACCEPT" && tolower($0) ~ ("proto " pr) && $0 ~ ("dpt:" p){found=1}
-    END{exit(found?0:1)}
-  '
+  if iptables -nL 2>/dev/null | awk -v p="$port" -v pr="$proto" '
+      BEGIN{IGNORECASE=1}
+      $1=="ACCEPT" && tolower($0) ~ ("proto " pr) && $0 ~ ("dpt:" p){found=1}
+      END{exit(found?0:1)}
+    '
+  then
+    return 0
+  fi
+  return 1
 }
 
-# Haupt-Check: bewertet, ob die Mindest-Ports offen sind
-# - Wenn iptables fehlt → "ok (keine FW)"
-# - Wenn Policy INPUT=ACCEPT → "ok (policy ACCEPT)"
-# - Sonst: prüfe erforderliche Ports
-firewall_ok() {
+firewall_ok(){
   local missing=()
 
   if ! fw_any_active; then
@@ -276,7 +273,7 @@ $(bold "RustDesk Server – Container Helper")
 Benutzung: $0 <befehl>
 
 Befehle:
-  deps | install | start | stop | restart | status | logs | upgrade | delete | ip | menu | help
+  deps | install | start | stop | restart | status | logs | upgrade | delete | fwcfg | ip | menu | help
 
 Beispiele:
   sudo $0 deps && sudo $0 install
@@ -287,6 +284,16 @@ EOF
 # ==========================
 #  Interaktives, farbiges Menü
 # ==========================
+run_ext_fw(){
+  if [[ -x "$EXT_FW_SCRIPT" ]]; then
+    "$EXT_FW_SCRIPT"
+  elif [[ -f "$EXT_FW_SCRIPT" ]]; then
+    bash "$EXT_FW_SCRIPT"
+  else
+    yellow "Externe Firewall-Konfiguration nicht gefunden: $EXT_FW_SCRIPT"
+  fi
+}
+
 render_menu(){
   clear
   # Health-Hinweis vorbereiten
@@ -296,7 +303,8 @@ render_menu(){
   else
     pub_status="nein (NAT beachten!)"
   fi
-  fw_status="$(firewall_ok)"; fw_ok=$?
+  fw_ok=0
+  fw_status="$(firewall_ok)" || fw_ok=$?
 
   bold "RustDesk Server – Menü"
   echo "Datenverzeichnis: $DATA_DIR"
@@ -329,6 +337,8 @@ render_menu(){
   local has_data_dir=0
   [[ -d "$DATA_DIR" ]] && has_data_dir=1
   local en_delete=$(( (any_exists || has_data_dir) ? 1 : 0 ))
+  local en_fwcfg=0
+  [[ -f "$EXT_FW_SCRIPT" ]] && en_fwcfg=1
   local en_ip=1
 
   local MENU_TEXT=( 
@@ -341,11 +351,12 @@ render_menu(){
     "Logs verfolgen"
     "Upgrade (neu ziehen & neu erstellen)"
     "Löschen (Container, optional Daten)"
+    "Firewall-Konfiguration starten"
     "Externe IP anzeigen"
     "Beenden"
   )
-  local MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_ip 1 )
-  local MENU_CMD=( deps install start stop restart status logs upgrade delete ip quit )
+  local MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_fwcfg $en_ip 1 )
+  local MENU_CMD=( deps install start stop restart status logs upgrade delete fwcfg ip quit )
 
   local i
   for ((i=0;i<${#MENU_TEXT[@]};i++)); do
@@ -366,10 +377,10 @@ menu_loop(){
     [[ -z "${choice:-}" ]] && continue
     if ! [[ "$choice" =~ ^[0-9]+$ ]]; then red "Bitte eine Zahl wählen."; sleep 1; continue; fi
     local idx=$((choice-1))
-    if (( idx < 0 || idx >= 11 )); then red "Ungültige Auswahl."; sleep 1; continue; fi
+    if (( idx < 0 || idx >= 12 )); then red "Ungültige Auswahl."; sleep 1; continue; fi
 
     # Arrays wie in render_menu()
-    local MENU_CMD=( deps install start stop restart status logs upgrade delete ip quit )
+    local MENU_CMD=( deps install start stop restart status logs upgrade delete fwcfg ip quit )
 
     # Zustand neu evaluieren (Enable/Disable aktuell halten)
     local ex_hbbs=0 ex_hbbr=0 run_hbbs=0 run_hbbr=0
@@ -391,8 +402,10 @@ menu_loop(){
     local has_data_dir=0
     [[ -d "$DATA_DIR" ]] && has_data_dir=1
     local en_delete=$(( (any_exists || has_data_dir) ? 1 : 0 ))
+    local en_fwcfg=0
+    [[ -f "$EXT_FW_SCRIPT" ]] && en_fwcfg=1
     local en_ip=1
-    local MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_ip 1 )
+    local MENU_EN=( $en_deps $en_install $en_start $en_stop $en_restart $en_status $en_logs $en_upgrade $en_delete $en_fwcfg $en_ip 1 )
 
     if [[ "${MENU_EN[$idx]}" -ne 1 ]]; then
       yellow "Diese Option ist aktuell nicht sinnvoll/verfügbar."
@@ -411,6 +424,7 @@ menu_loop(){
       logs)     logs_follow; pause ;;
       upgrade)  upgrade_all; pause ;;
       delete)   delete_all; pause ;;
+      fwcfg)    run_ext_fw; pause ;;
       ip)       show_ips; pause ;;
       quit)     break ;;
     esac
@@ -432,6 +446,7 @@ main(){
     logs)     logs_follow ;;
     upgrade)  upgrade_all ;;
     delete)   delete_all ;;
+    fwcfg)    run_ext_fw ;;
     ip)       show_ips ;;
     menu)     menu_loop ;;
     help|-h|--help) usage ;;
