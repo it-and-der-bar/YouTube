@@ -27,7 +27,7 @@ KFILE="${KDIR}/rustdesk.yaml"
 
 # Externe Firewall-Konfiguration (relativ zum Skript)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXT_FW_SCRIPT="${SCRIPT_DIR}/../Firewall-Config/firewall-config.sh"
+EXT_FW_SCRIPT="${SCRIPT_DIR}/../../Firewall-Config/firewall-config.sh"
 
 # Mindestports für RustDesk OSS (Firewall-Check)
 REQ_TCP=(21115 21116 21117)         # TCP hbbs/hbbr
