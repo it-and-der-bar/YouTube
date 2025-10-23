@@ -87,6 +87,7 @@ qm create 901 \
   --cores 2 \
   --scsihw virtio-scsi-pci
 qm set 901 --efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0
+qm set 901 --net0 virtio,bridge=vmbr0
 qm config 901
 
 #disk import
