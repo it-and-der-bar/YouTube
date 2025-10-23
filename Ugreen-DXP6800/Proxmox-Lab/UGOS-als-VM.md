@@ -19,6 +19,7 @@ qemu-img convert -p -O qcow2 -c /dev/nvme0n1 /root/nvme0n1.qcow2
 VM-ID im Beispiel: **901**, Storage: **local-lvm**, Format: **raw**
 ---
 ## 2b) VM 901 anlegen
+```bash
 qm create 901 \
   --name ugos \
   --machine q35 \
@@ -34,6 +35,7 @@ qm config 901
 
 qm importdisk 901 /root/nvme0n1.qcow2 local-lvm --format raw
 qm set 901 --boot order=sata0
+```
 ---
 
 
@@ -70,7 +72,6 @@ umount /mnt/pve-vm--901--disk--1p1
 kpartx -l /dev/pve/vm-901-disk-1
 rm -r /mnt/pve-vm--901--disk--1p1
 ```
-
 
 ## one shot
 ```bash
@@ -113,7 +114,6 @@ kpartx -dv /dev/pve/vm-901-disk-1
 rm -r /mnt/pve-vm--901--disk--1p1
 
 ```
-
 
 ---
 
