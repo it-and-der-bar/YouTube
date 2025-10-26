@@ -117,10 +117,3 @@ rm -r /mnt/pve-vm--901--disk--1p1
 ```
 
 ---
-
-## Hinweise
-
-- Die Befehle wurden **unverändert** übernommen (keine zusätzlichen Schritte).  
-- Die **Partitionen** im Beispiel: `/dev/sda1` (ESP), `/dev/sda3` (Root).  
-- Die Anpassungen erfolgten aus einer **Ubuntu 24 Live**-Umgebung.
-
