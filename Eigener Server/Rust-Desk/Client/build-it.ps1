@@ -2,12 +2,15 @@
 
 param(
   [Parameter(Mandatory=$false)][string]$AppName,
-  [Parameter(Mandatory=$false)][string]$RendezvousServer,
-  [Parameter(Mandatory=$false)][string]$RsPubKey,
+  [alias("Server")][Parameter(Mandatory=$false)][string]$RendezvousServer,
+  [alias("PublicKey", "Key")][Parameter(Mandatory=$false)][string]$RsPubKey,
+  [alias("Version")][Parameter(Mandatory=$false)][string]$RsVersion,
   [switch]$SkipClone,
   [switch]$SkipVcpkgInstall,
-  [switch]$NoPack,
-  [switch]$NoCleanBuild
+  [switch]$NoCleanBuild,
+  [switch]$PatchSecureTcp,
+  [switch]$RemoveNewVersionInfo,
+  [switch]$Uninstall
 )
 
 # =================== helpers ===================
@@ -17,30 +20,71 @@ function Ok  ([string]$m){ Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn([string]$m){ Write-Host "[!!] $m" -ForegroundColor Yellow }
 function Fail([string]$m){ Write-Host "[XX] $m" -ForegroundColor Red; exit 1 }
 
+$defaultProgressPreference = $ProgressPreference
+$ProgressPreference = 'SilentlyContinue'
+$Root = (Get-Location).Path
+
 function Test-IsAdmin {
     $p = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+
 # =================== preflight ===================
 function Get-Inputs {
   if (-not $script:AppName)          { $script:AppName          = Read-Host "App-Name (z.B. my-client)" }
   if (-not $script:RendezvousServer) { $script:RendezvousServer = Read-Host "Rendezvous-Server (z.B. rustdesk.example.tld)" }
   if (-not $script:RsPubKey)         { $script:RsPubKey         = Read-Host "RS_PUB_KEY" }
+  if (-not $script:AppName)          { $script:AppName          = "RustDesk" }
+  if (-not $script:RsVersion)        { $script:RsVersion        = "master" } #1.4.4 / latest / master
 
-  $script:Root        = (Get-Location).Path
-  $script:RustDeskDir = Join-Path $Root 'rustdesk'
-  $script:VcpkgDir    = Join-Path $Root 'vcpkg'
-  $script:MyResDir    = Join-Path $Root 'my-ressources'
-  $script:NsisScript  = Join-Path $Root 'custom-rd-client.nsi'
-  $script:Makensis    = 'C:\Program Files (x86)\NSIS\makensis.exe'
-  $script:LlvmBin     = 'C:\Program Files\LLVM\bin'
+  $script:RustDeskDir   = Join-Path $Root 'rustdesk'
+  $script:RustBridgeDir = Join-Path $Root 'rust-bridge'
+  $script:VcpkgDir      = Join-Path $Root 'vcpkg'
+  $script:FlutterDir    = Join-Path $Root 'flutter'
+  $script:MyResDir      = Join-Path $Root 'my-ressources'
+  $script:LlvmBin       = 'C:\Program Files\LLVM\bin'
+  $script:CacheDir      = Join-Path $Root 'cache'
 
+  $script:FLUTTER_VERSION             = "3.24.5"
+  $script:CARGO_EXPAND_VERSION        = "1.0.95"
+  $script:LLVM_VERSION                = "15.0.6"
+  $script:FLUTTER_RUST_BRIDGE_VERSION = "1.80.1"
+  $script:RUSTUP_VERSION              = "1.75"
+  $script:RD_TOPMOSTWINDOW_COMMIT_ID  = "53b548a5398624f7149a382000397993542ad796"
+  $script:VCPKG_COMMIT_ID             = "120deac3062162151622ca4860575a33844ba10b"
+  $script:VCPKG_BINARY_SOURCES        = "clear;x-gha,readwrite"
+  
+  $Env:VCPKG_ROOT                     = $VcpkgDir
+  $Env:VCPKG_DEFAULT_HOST_TRIPLET     = "x64-windows-static"
+  $Env:VCPKG_DISABLE_METRICS          = "true"
+  $Env:VCPKG_BINARY_SOURCES           = "clear;x-gha,readwrite"
+
+  Ok ("AppName: {0}" -f $AppName)
   Ok ("Arbeitsverzeichnis: {0}" -f $Root)
   Ok ("Ziel-Repo: {0}" -f $RustDeskDir)
   Ok ("vcpkg-Ordner: {0}" -f $VcpkgDir)
   Ok ("Ressourcen-Ordner: {0}" -f $MyResDir)
+  
+  if (-not (Test-Path $CacheDir)) { New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null }
 
-  if (-not (Test-Path $NsisScript)) { Fail ("NSIS-Script fehlt: {0}" -f $NsisScript) } else { Ok ("NSIS-Script: {0}" -f $NsisScript) }
+  #Unzip faster than Expand-Archive
+  Add-Type -Assembly "System.IO.Compression.Filesystem"
+}
+
+function ReplaceInFile {
+  param (
+    [string]$File,
+    [string]$pattern,
+    [string]$NewString,
+    [switch]$UseRegex
+  )
+    if (Test-Path $File) {
+      if ($UseRegex) {
+        (Get-Content -Raw -LiteralPath $File) -replace "$pattern", "$NewString" | Set-Content -Path "$File" -Encoding UTF8
+      } else {
+        (Get-Content -Raw -LiteralPath $File).Replace("$pattern", "$NewString") | Set-Content -Path "$File" -Encoding UTF8
+      }
+    }
 }
 
 #NTFS Check
@@ -66,22 +110,17 @@ function Get-FilesystemType {
 }
 
 function Ensure-RootOnNtfs {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Root)
-
     Say "pruefe Dateisystem fuer: $Root"
     if (-not (Test-Path -LiteralPath $Root)) {
         Warn "Pfad existiert nicht: $Root"
-        return $false
+        return
     }
 
     $fs = Get-FilesystemType -Path $Root
     if ($fs -eq 'NTFS') {
         Ok "'$Root' liegt auf NTFS."
-        return $true
     } else {
         Warn "'$Root' liegt auf $fs (nicht NTFS)."
-        return $false
     }
 }
 
@@ -116,9 +155,9 @@ function Test-And-Handle-ASLR {
     if (-not $Quiet) {
         Say ("ASLR status: BottomUp={0}  HighEntropy={1}  ForceRelocateImages={2}" -f $aslr.BottomUp,$aslr.HighEntropy,$aslr.ForceRelocateImages)
         if ($anyOn) { Warn 'ASLR ist AN.' }
-        else        { Ok 'ASLR ist AUS.'; return 0 }
+        else        { Ok 'ASLR ist AUS.'; return }
     } else {
-        if (-not $anyOn) { return 0 }
+        if (-not $anyOn) { return }
     }
 
     if ($AutoDisable) {
@@ -134,7 +173,7 @@ function Test-And-Handle-ASLR {
         return (Disable-ASLR -Quiet:$Quiet)
     } else {
         Say 'ASLR bleibt an.'
-        return 1
+        return
     }
 }
 
@@ -151,7 +190,7 @@ function Disable-ASLR {
         Fail ("Set-ProcessMitigation failed: {0}" -f $_.Exception.Message)
     }
     if (-not $Quiet) { Ok 'ASLR deaktiviert. Neustart notwendig!' }
-    return 0
+    return
 }
 
 function Reset-ASLR-ToDefault {
@@ -167,14 +206,16 @@ function Reset-ASLR-ToDefault {
         Fail ("Set-ProcessMitigation (reset) fehlgeschlagen: {0}" -f $_.Exception.Message)
     }
     if (-not $Quiet) { Ok 'ASLR auf Standard. Neustart notwendig!' }
-    return 0
+    return
 }
 
 # =================== tools ===================
 function Ensure-Git {
   if (Get-Command git -ErrorAction SilentlyContinue) { Ok 'Git gefunden.'; return }
   Warn 'Git fehlt - Installation via winget...'
-  winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements | Out-Null
+  winget install --id Git.Git -e --source winget --silent --accept-source-agreements --accept-package-agreements | Out-Null
+  if (Test-Path "C:\Program Files\Git\bin") { $env:Path = "C:\Program Files\Git\bin;$env:Path" }
+  if (Test-Path "C:\Program Files\Git\usr\bin") { $env:Path = "C:\Program Files\Git\usr\bin;$env:Path" }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail 'Git nicht installiert.' }
   Ok 'Git installiert.'
 }
@@ -237,6 +278,9 @@ function Find-Vcvars {
   if ($p.ExitCode -ne 0) {
     Fail ("Installation der Build Tools fehlgeschlagen (ExitCode {0})." -f $p.ExitCode)
   }
+  while ((Get-Process -Name setup -ErrorAction SilentlyContinue).MainWindowTitle -eq "Visual Studio Installer") {
+    Start-Sleep 2
+  }
   Ok 'Build Tools installiert. Suche vcvarsall erneut...'
 
   $vc = _probe
@@ -248,7 +292,14 @@ function Find-Vcvars {
   Ok ("vcvarsall gefunden: {0}" -f $Vcvars)
 }
 
-# erwartet: Say/Ok/Warn/Fail sind bereits definiert
+function Find-MSBuildTools {
+  $MSBuildTools = Resolve-Path "$(Resolve-Path "$Vcvars\..\..\..\.." -ErrorAction SilentlyContinue)\MSBuild\Current\Bin\amd64\" -ErrorAction SilentlyContinue
+  if ($MSBuildTools) {
+    Ok ("MSBuildTools gefunden: {0}" -f $MSBuildTools)
+    $env:Path = "$MSBuildTools;$env:Path"
+  } else { Warn "MSBuild Tools nicht gefunden"}
+}
+
 function Ensure-RustToolchain {
 
     function Test-Cargo {
@@ -257,14 +308,16 @@ function Ensure-RustToolchain {
         return $false
     }
 
-    if (Test-Cargo) { return }
+    if (Test-Cargo) { 
+      if ((rustc -V) -like "*$($RUSTUP_VERSION)*") { return }
+    }
 
     # 1) winget versuchen (mehrere Paket-IDs, user-scope, silent)
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Say "installiere Rust via winget..."
         $ids = @(
             "Rustlang.Rustup",      # rustup bootstrap
-            "Rustlang.Rust.MSVC",   # üblicher MSVC-Toolchain
+            "Rustlang.Rust.MSVC",   # ueblicher MSVC-Toolchain
             "Rustlang.Rust.GNU"     # GNU-Toolchain (Fallback)
         )
         foreach ($id in $ids) {
@@ -276,80 +329,70 @@ function Ensure-RustToolchain {
                 )
                 $p = Start-Process -FilePath "winget" -ArgumentList $args -NoNewWindow -PassThru -Wait
                 if ($p.ExitCode -eq 0) {
-                    # PATH der aktuellen Session ergänzen (rustup legt unter %USERPROFILE%\.cargo\bin ab)
+                    # PATH der aktuellen Session ergaenzen (rustup legt unter %USERPROFILE%\.cargo\bin ab)
                     $cargoBin = Join-Path $HOME ".cargo\bin"
                     if (Test-Path $cargoBin) { $env:Path = "$cargoBin;$env:Path" }
+                    if ((rustc -V) -notlike "*$($RUSTUP_VERSION)*") {
+                        Say ("Pin Rust Toolchain ({0})" -f $RUSTUP_VERSION)
+                        rustup install --no-self-update --allow-downgrade $RUSTUP_VERSION
+                        rustup default $RUSTUP_VERSION
+                    }
                     if (Test-Cargo) { return }
                 }
-            } catch { Warn ("winget fehlgeschlagen für {0}: {1}" -f $id, $_.Exception.Message) }
+            } catch { Warn ("winget fehlgeschlagen fuer {0}: {1}" -f $id, $_.Exception.Message) }
         }
         Fail "winget konnte Rust nicht bereitstellen."
     } else {
-        Fail "winget nicht verfügbar."
+        Fail "winget nicht verfuegbar."
     }
 }
 
-function Ensure-Perl {
-
-    # Bereits vorhanden?
-    $perlCmd = Get-Command perl -ErrorAction SilentlyContinue
-    if ($perlCmd) {
-        $env:VCPKG_PERL_PATH = $perlCmd.Source
-        Write-Host "Perl bereits vorhanden: $($perlCmd.Source)"
-        return $perlCmd.Source
+function Ensure-Python {
+  if ((Get-Command python) -and (Get-Command python).Version.Major -ne 0) {
+    if (((python --version) -match "Python 3") -and (Get-Command python3).Version.Major -ne 0) {
+      Ok ("Python 3: {0}" -f (Get-Command python).Source)
+      return
     }
+  }
 
-    # winget verfuegbar?
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "winget ist nicht verfuegbar. Bitte zuerst winget installieren/aktivieren."
-    }
-    Warn("Perl nicht gefunden - installiere Strawberry Perl via winget ...")
-    winget install --id StrawberryPerl.StrawberryPerl 
+  if (!(Get-Command python)) {
+    Warn 'Python3 fehlt - Installation via winget...'
+    winget install --id Python.Python.3.13 -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    Ok ("Python3 installiert: {0}" -f (Get-Command python).Source)
+  }
 
-    # Versuch, perl zu finden (PATH kann fuer die aktuelle Session noch nicht aktualisiert sein)
-    $perlCmd = Get-Command perl -ErrorAction SilentlyContinue
-    if (-not $perlCmd) {
-        # Haeufige Installationspfade pruefen und temporaer in PATH aufnehmen
-        $candidates = @(
-            "$env:LOCALAPPDATA\Programs\Strawberry\perl\bin\perl.exe",
-            "C:\Strawberry\perl\bin\perl.exe"
-        )
-        foreach ($p in $candidates) {
-            if (Test-Path $p) {
-				$env:Path = ('{0};{1}' -f (Split-Path $p), $env:Path)
-                #$env:Path = "$(Split-Path $p);$env:Path"
-                $perlCmd = Get-Command perl -ErrorAction SilentlyContinue
-                if ($perlCmd) { break }
-            }
-        }
-    }
-
-    if (-not $perlCmd) {
-        Fail("Perl wurde nach der Installation nicht gefunden. Bitte Terminal neu oeffnen und erneut versuchen.", 11)
-    }
-
-    $env:VCPKG_PERL_PATH = $perlCmd.Source
-    Ok ("Perl bereit: $($perlCmd.Source)")
-    return $perlCmd.Source
+  if (!(Get-Command python3) -or (Get-Command python3).Version.Major -eq 0) {
+    Say "Erstelle Symbolic Link python3 -> python"
+    $pSource = (Get-Command python).Source
+    New-Item -ItemType SymbolicLink -Path $pSource.Replace("python.exe","python3.exe") -Target $pSource
+  }
 }
-
-
 
 function Ensure-LLVM {
-  if (Test-Path (Join-Path $LlvmBin 'libclang.dll')) { Ok ("LLVM/libclang: {0}" -f $LlvmBin) }
-  else { Fail ("LLVM (libclang.dll) fehlt unter: {0} 
-Installer: https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.2/LLVM-15.0.2-win64.exe" -f $LlvmBin) }
+  if (Test-Path (Join-Path $LlvmBin 'libclang.dll')) {
+    if ((clang --version) -match "$LLVM_VERSION") {
+      Ok ("LLVM/libclang: {0}" -f $LlvmBin)
+      return
+    }
+  }
+
+  Warn "LLVM ($LLVM_VERSION) fehlt - Installation via winget..."
+  winget install --id LLVM.LLVM -e --version $LLVM_VERSION --silent --accept-source-agreements --accept-package-agreements | Out-Null
+  if ($LASTEXITCODE -ne 0) { Fail 'LLVM Installation fehlgeschlagen.' }
+  $env:Path = "$LlvmBin;$env:Path"
+  Ok "LLVM installiert"
 }
 
 function Ensure-SciterDll {
-  $script:BinCacheDir   = Join-Path $Root 'bin-cache\win64'
-  if (-not (Test-Path $BinCacheDir)) { New-Item -ItemType Directory -Path $BinCacheDir -Force | Out-Null }
-
-  $script:SciterDllCache = Join-Path $BinCacheDir 'sciter.dll'
+  $script:SciterDllCache = Join-Path $CacheDir 'sciter.dll'
   if (-not (Test-Path $SciterDllCache)) {
-    Say 'Lade sciter.dll in bin-cache...'
+    Say "Lade sciter.dll in $CacheDir..."
     $uri = 'https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll'
+    $defaultProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $uri -OutFile $SciterDllCache -UseBasicParsing
+    $ProgressPreference = $defaultProgressPreference
     if (-not (Test-Path $SciterDllCache) -or ((Get-Item $SciterDllCache).Length -lt 100000)) {
       Fail 'sciter.dll Download fehlerhaft.'
     }
@@ -359,16 +402,11 @@ function Ensure-SciterDll {
   }
 }
 
-function Ensure-NSIS {
-  if (Test-Path $Makensis) { Ok ("makensis gefunden: {0}" -f $Makensis) }
-  else { Fail 'NSIS fehlt. Installiere: https://nsis.sourceforge.io/Download' }
-}
-
 function Ensure-Vcpkg {
   if (-not (Test-Path $VcpkgDir)) {
     Ensure-Git
     Say ("Klonen vcpkg -> {0}" -f $VcpkgDir)
-    git clone https://github.com/microsoft/vcpkg $VcpkgDir | Out-Null
+    git clone --revision=$VCPKG_COMMIT_ID "https://github.com/microsoft/vcpkg" $VcpkgDir | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail 'git clone vcpkg fehlgeschlagen.' }
     Ok 'vcpkg geklont.'
   } else { Ok 'vcpkg-Ordner vorhanden.' }
@@ -376,20 +414,185 @@ function Ensure-Vcpkg {
   $exe = Join-Path $VcpkgDir 'vcpkg.exe'
   if (-not (Test-Path $exe)) {
     Say 'Bootstrap vcpkg...'
-    & (Join-Path $VcpkgDir 'bootstrap-vcpkg.bat')
+    & (Join-Path $VcpkgDir 'bootstrap-vcpkg.bat') -disableMetrics
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) { Fail 'vcpkg bootstrap fehlgeschlagen.' }
     Ok 'vcpkg gebootstrapped.'
   } else { Ok 'vcpkg.exe vorhanden.' }
-
   $script:VcpkgExe = $exe
+}
+
+function Ensure-Flutter {
+  $script:FlutterCache = Join-Path $CacheDir 'flutter.zip'
+  if (-not (Test-Path $FlutterCache)) {
+    Say "Lade Flutter Framework nach $CacheDir..."
+    $uri = "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_${FLUTTER_VERSION}-stable.zip"
+    $defaultProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri "$uri" -OutFile "$FlutterCache" -UseBasicParsing
+    $ProgressPreference = $defaultProgressPreference
+    if (-not (Test-Path $FlutterCache)) {
+      Fail 'Flutter Download fehlerhaft.'
+    }
+    Ok ("Flutter cached: {0}" -f $FlutterCache)
+  } else { Ok 'Flutter-Cache vorhanden.' }
+  
+  if ((Test-Path "$FlutterDir") -and $NoCleanBuild) { 
+    Ok 'Flutter-Ordner vorhanden.'
+  } else {
+    if ((Test-Path $FlutterDir)) {
+      Remove-Item $FlutterDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Say "Entpacke..."
+    [System.IO.Compression.ZipFile]::ExtractToDirectory("$FlutterCache", "$Root")
+  }
+  
+  $env:Path = ('{0};{1}' -f (Join-Path $FlutterDir bin), $env:Path)
+  
+  Say "bootstrap flutter..."
+  flutter doctor -v
+  flutter precache --windows
+  if ($LASTEXITCODE -ne 0) { Pop-Location; Fail 'flutter bootstrap fehlgeschlagen.' }
+  Ok 'bootstrap gebootstrapped.'
+
+  Say "Ersetze Flutter Engine mit RustDesk Engine"
+  $EngingeZip = Join-Path $CacheDir "windows-x64-release.zip"
+  if (!(Test-Path $EngingeZip)) {
+      Say "Lade Engine nach $CacheDir..."
+      Invoke-WebRequest -Uri "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip" -OutFile $EngingeZip
+      Ok "Engine cached: $EngingeZip"
+  }
+  $TempEnginePath = Join-Path $FlutterDir "windows-x64-release"
+  if ((Test-Path $TempEnginePath)) {
+      Remove-Item $TempEnginePath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+  }
+  Say "Entpacke..."
+  [System.IO.Compression.ZipFile]::ExtractToDirectory($EngingeZip, $TempEnginePath)
+  Move-Item -Force $TempEnginePath\*  (Join-Path $FlutterDir "bin\cache\artifacts\engine\windows-x64-release")
+  Remove-Item $TempEnginePath -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+}
+
+function Ensure-usbmmidd {
+  $script:UsbmmiddCache = Join-Path $CacheDir 'usbmmidd_v2.zip'
+  if (!(Test-Path $UsbmmiddCache)) {
+      Say "Lade usbmmidd_v2..."
+      Invoke-WebRequest -Uri "https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip" -OutFile $UsbmmiddCache
+      if (Test-Path $UsbmmiddCache) {Ok "usbmmidd_v2 cached: $UsbmmiddCache"} else {Fail "herunterladen fehlgeschlagen."}
+  } else { Ok 'usbmmidd_v2 cache vorhanden.' }
+}
+
+function Ensure-ImageMagick {
+  winget list -e --id ImageMagick.Q16-HDRI | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Say "installiere ImageMagick.Q16-HDRI via winget..."
+    winget install --id ImageMagick.Q16-HDRI -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
+  } else { Ok ("ImageMagick vorhanden: {0}" -f (Get-Command magick).Source) }
+}
+
+function Generate-RustBridge {
+  if ((Test-Path $RustBridgeDir) -and -not $NoCleanBuild) {
+    Say "Bereinige $RustBridgeDir"
+    Remove-Item $RustBridgeDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  if (Test-Path (Join-Path $RustDeskDir "flutter\lib\generated_bridge.dart")) {
+    Ok 'generated_bridge.dart vorhanden - ueberspringe Generierung.'
+    return
+  }
+
+  if (-not (Test-Path $RustBridgeDir)) {
+    Say 'Clone rustdesk Ordner...'
+    Copy-Item $RustDeskDir $RustBridgeDir -Recurse
+  }
+
+  Say "bootstrap rust-bridge..."
+  Set-Location $RustBridgeDir
+  cargo install cargo-expand --version $CARGO_EXPAND_VERSION --locked
+  cargo install flutter_rust_bridge_codegen --version $FLUTTER_RUST_BRIDGE_VERSION --features "uuid" --locked
+  Push-Location flutter
+  ReplaceInFile -File pubspec.yaml -pattern 'extended_text: 14.0.0' -NewString 'extended_text: 13.0.0'
+  flutter pub get
+  Pop-Location
+
+  Say "Generiere flutter rust bridge" -ForegroundColor green
+  & "$env:UserProfile\.cargo\bin\flutter_rust_bridge_codegen.exe" --rust-input .\src\flutter_ffi.rs --dart-output .\flutter\lib\generated_bridge.dart --c-output .\flutter\macos\Runner\bridge_generated.h
+  #Copy-Item "flutter\macos\Runner\bridge_generated.h" "flutter\ios\Runner\bridge_generated.h"
+  Set-Location $Root
+  if (Test-Path (Join-Path $RustBridgeDir "flutter\lib\generated_bridge.dart")) {
+    Copy-Item (Join-Path $RustBridgeDir "src\bridge_generated.rs") (Join-Path $RustDeskDir "src")
+    Copy-Item (Join-Path $RustBridgeDir "src\bridge_generated.io.rs") (Join-Path $RustDeskDir "src")
+    Copy-Item (Join-Path $RustBridgeDir "flutter\lib\generated_bridge.dart") (Join-Path $RustDeskDir "flutter\lib")
+    Copy-Item (Join-Path $RustBridgeDir "flutter\lib\generated_bridge.freezed.dart") (Join-Path $RustDeskDir "flutter\lib")
+    #Copy-Item (Join-Path $RustBridgeDir "flutter\macos\Runner\bridge_generated.h") (Join-Path $RustDeskDir "flutter\macos\Runner")
+    #Copy-Item (Join-Path $RustBridgeDir "flutter\ios\Runner\bridge_generated.h") (Join-Path $RustDeskDir "flutter\macos\Runner")
+    Ok 'rust-bridge erstellt'
+  } else {
+    Fail 'Generierung rust-bridge fehlgeschlagen.'
+  }
+}
+
+function Generate-RustDeskTempTopMostWindow {
+  $RustDeskTempTopMostWindow = Join-Path $Root "RustDeskTempTopMostWindow"
+  $script:WindowInjectionDLL = Join-Path $RustDeskTempTopMostWindow "WindowInjection\x64\Release\WindowInjection.dll"
+  $RustDeskTempTopMostWindowCache = Join-Path $CacheDir "RustDeskTempTopMostWindow.zip"
+
+  if ((Test-Path $RustDeskTempTopMostWindow) -and (Test-Path $WindowInjectionDLL) -and $NoCleanBuild) {
+    Ok 'RustDeskTempTopMostWindow/ vorhanden - ueberspringe Erstellen.'
+    return
+  } else {
+    if (Test-Path $RustDeskTempTopMostWindow) {
+      Say "Bereinige $RustDeskTempTopMostWindow"
+      Remove-Item $RustDeskTempTopMostWindow -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  Say ("Erstelle RustDeskTempTopMostWindow (WindowInjection.dll)")
+  if (Test-Path $RustDeskTempTopMostWindowCache) {
+      if (Test-Path $RustDeskTempTopMostWindow) {
+          Remove-Item $RustDeskTempTopMostWindow -Recurse -Force -ErrorAction SilentlyContinue
+      }
+      [System.IO.Compression.ZipFile]::ExtractToDirectory($RustDeskTempTopMostWindowCache, $RustDeskTempTopMostWindow)
+  } else {
+      if (Test-Path $RustDeskTempTopMostWindow) {
+          Remove-Item $RustDeskTempTopMostWindow -Recurse -Force -ErrorAction SilentlyContinue
+      }
+
+      Say ("Klonen RustDeskTempTopMostWindow: {0}" -f $RustDeskTempTopMostWindow)
+      git clone "https://github.com/rustdesk-org/RustDeskTempTopMostWindow" $RustDeskTempTopMostWindow
+
+      Write-Host "Generate cache" -ForegroundColor green
+      Push-Location $RustDeskTempTopMostWindow
+      Compress-Archive -Path * -DestinationPath $RustDeskTempTopMostWindowCache -Force -CompressionLevel Fastest
+      Pop-Location
+  }
+
+  Write-Output "Generiere WindowInjection.dll"
+  Push-Location $RustDeskTempTopMostWindow
+  git checkout $RD_TOPMOSTWINDOW_COMMIT_ID
+  
+  Say "Migriere PlatformToolset v142 zu v143"
+  $patchPlatform = Join-Path $RustDeskTempTopMostWindow "WindowInjection\WindowInjection.vcxproj"
+  ReplaceInFile -File $patchPlatform -pattern "<PlatformToolset>v142</PlatformToolset>" -NewString "<PlatformToolset>v143</PlatformToolset>"
+  Ok ""
+  
+  msbuild WindowInjection\WindowInjection.vcxproj -p:Configuration=Release -p:Platform=x64 -p:TargetVersion=Windows10
+  Pop-Location
+  if (Test-Path $WindowInjectionDLL) {
+    Ok ('WindowInjection.dll vorhanden.')
+  } else {
+    Fail ("Build fehlgeschlagen.")
+  }
 }
 
 # =================== repo/customize ===================
 function Clone-RustDesk {
+  if ((Test-Path $RustDeskDir) -and -not $NoCleanBuild) {
+    Say "Bereinige $RustDeskDir"
+    Remove-Item $RustDeskDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
   if (-not (Test-Path $RustDeskDir)) {
     if ($SkipClone) { Fail 'rustdesk/ fehlt aber -SkipClone gesetzt.' }
     Say 'Clone rustdesk Repo...'
-    git clone --recurse-submodules https://github.com/rustdesk/rustdesk $RustDeskDir
+    git clone --recurse-submodules --branch $RsVersion "https://github.com/rustdesk/rustdesk" $RustDeskDir
     if ($LASTEXITCODE -ne 0) { Fail 'git clone rustdesk fehlgeschlagen.' }
     Ok 'rustdesk geklont.'
   } else {
@@ -410,48 +613,36 @@ function Patch-Config {
   $key = $RsPubKey.Replace('"','\"')
 
   $repApp = "pub static ref APP_NAME: RwLock<String> = RwLock::new(`"$app`".to_owned());"
-  $repRdv = "pub const RENDEZVOUS_SERVERS: &[&str] = [`"$rdv`"];"
+  $repRdv = "pub const RENDEZVOUS_SERVERS: &[&str] = &[`"$rdv`"];"
   $repKey = "pub const RS_PUB_KEY: &str = `"$key`";"
 
   $txt = [regex]::Replace($txt, '(?m)^*pub\s+static\s+ref\s+APP_NAME:.*$', $repApp)
-  $txt = [regex]::Replace($txt,'(?m)^\s*pub\s+const\s+RENDEZVOUS_SERVERS:.*$',"pub const RENDEZVOUS_SERVERS: &[&str] = &[`"$RendezvousServer`"];")
+  $txt = [regex]::Replace($txt,'(?m)^\s*pub\s+const\s+RENDEZVOUS_SERVERS:.*$',$repRdv)
   $txt = [regex]::Replace($txt, '(?m)^\s*pub\s+const\s+RS_PUB_KEY:.*$', $repKey)
 
   Set-Content -LiteralPath $cfg.FullName -Value $txt -Encoding UTF8
   Ok 'config.rs aktualisiert.'
 }
 
+function Patch-Client {
+  Say "Entferne Server Hinweis"
+  ReplaceInFile -File (Join-Path $RustDeskDir "flutter\lib\desktop\pages\connection_page.dart") -pattern "if (!isIncomingOnly) setupServerWidget()," -NewString "//if (!isIncomingOnly) setupServerWidget(),"
+  Ok ""
 
-function Patch-NSIS {
+  if ($PatchSecureTcp) {
+    # https://github.com/infiniteremote/installer/issues/36
+    Say "Patch Secure TCP Verbindungsfehler bei eigenem API-Server"
+    ReplaceInFile -File (Join-Path $RustDeskDir "\src\client.rs") -pattern '(peer, "", key, token)' -NewString '(peer, "", key, "")'
+    Ok ""
+  }
 
-    if (-not (Test-Path -LiteralPath $NsisScript)) {
-        Fail ("NSIS-Datei nicht gefunden: {0}" -f $NsisScript)
-    }
-
-    $app = $AppName.Replace('"','\"') 
-    $stem = ($AppName -replace '[^A-Za-z0-9._-]','-') -replace '-{2,}','-'
-    $stem = $stem.Trim('-'); if ([string]::IsNullOrWhiteSpace($stem)) { $stem = 'app' }
-    $exe  = "$stem.exe"
-
-    $repDefine = '!define APPNAME "' + $app + '"'
-    $repOut    = 'OutFile "' + $exe + '"'
-    $repFD     = 'VIAddVersionKey "FileDescription" "RustDesk ' + $app + '"'
-    $repPN     = 'VIAddVersionKey "ProductName"     "RustDesk"'
-
-    Say ("patch NSIS: {0}" -f $NsisScript)
-    $txt = Get-Content -LiteralPath $NsisScript -Raw
-
-    $txt = [regex]::Replace($txt, '(?m)^\s*!define\s+APPNAME\s+.*$',                     $repDefine)
-    $txt = [regex]::Replace($txt, '(?m)^\s*OutFile\s+.*$',                               $repOut)
-    $txt = [regex]::Replace($txt, '(?m)^\s*VIAddVersionKey\s+"FileDescription"\s+.*$',   $repFD)
-    $txt = [regex]::Replace($txt, '(?m)^\s*VIAddVersionKey\s+"ProductName"\s+.*$',       $repPN)
-
-    Set-Content -LiteralPath $NsisScript -Value $txt -Encoding UTF8
-    Ok ("NSIS aktualisiert. OutFile -> {0}" -f $exe)
-    return $exe
+  if ($RemoveNewVersionInfo) {
+    Say "Entferne neue Version Benachrichtigung"
+    ReplaceInFile -File (Join-Path $RustDeskDir "flutter\lib\desktop\pages\desktop_home_page.dart") -pattern 'updateUrl.isNotEmpty' -NewString 'false'
+    ReplaceInFile -File (Join-Path $RustDeskDir "src\common.rs") -UseRegex -pattern "let \(request, url\) =([\r\n]|.)*?Ok\(\(\)\)" -NewString "Ok(())"
+    Ok ""
+  }
 }
-
-
 
 function Generate-ResourcesFromLogo {
   if (-not (Test-Path $MyResDir)) { New-Item -ItemType Directory -Path $MyResDir -Force | Out-Null }
@@ -459,130 +650,16 @@ function Generate-ResourcesFromLogo {
   $logo = Join-Path $root 'logo.png'
   if (-not (Test-Path $logo)) { Warn 'logo.png nicht gefunden - Generierung uebersprungen.'; return }
 
-  Add-Type -AssemblyName System.Drawing
-
-  function Resize-SavePng([System.Drawing.Image]$img, [int]$size, [string]$outPath) {
-    $bmp = New-Object System.Drawing.Bitmap $size, $size
-    try {
-      $bmp.SetResolution($img.HorizontalResolution, $img.VerticalResolution)
-      $g = [System.Drawing.Graphics]::FromImage($bmp)
-      try {
-        $g.InterpolationMode  = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $g.SmoothingMode      = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-        $g.PixelOffsetMode    = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-        $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
-        $g.DrawImage($img, 0, 0, $size, $size)
-      } finally { $g.Dispose() }
-      $bmp.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally { $bmp.Dispose() }
-  }
-
-  function New-IcoFromPngs([string]$outPath, [string[]]$pngPaths) {
-    # schreibt eine .ico Datei mit PNG-kodierten Eintraegen (Vista+)
-    $streams = @()
-    try {
-      foreach ($p in $pngPaths) {
-        $ms = New-Object System.IO.MemoryStream
-        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($p)
-        $ms.Write($bytes, 0, $bytes.Length) | Out-Null
-        $streams += ,@($p, $ms, $bytes.Length)
-      }
-
-      $fs = [System.IO.File]::Open($outPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
-      try {
-        $bw = New-Object System.IO.BinaryWriter($fs)
-
-        $count = $streams.Count
-        # ICONDIR
-        $bw.Write([UInt16]0)      # Reserved
-        $bw.Write([UInt16]1)      # Type = 1 (icon)
-        $bw.Write([UInt16]$count) # Count
-
-        # Platzhalter fuer ICONDIRENTRYs merken
-        $entriesPos = $fs.Position
-        for ($i=0; $i -lt $count; $i++) {
-          # 16 Bytes pro Eintrag
-          $bw.Write([byte]0)      # width placeholder
-          $bw.Write([byte]0)      # height placeholder
-          $bw.Write([byte]0)      # colors (0)
-          $bw.Write([byte]0)      # reserved
-          $bw.Write([UInt16]1)    # planes
-          $bw.Write([UInt16]32)   # bitcount
-          $bw.Write([UInt32]0)    # bytes in res placeholder
-          $bw.Write([UInt32]0)    # offset placeholder
-        }
-
-        $entryData = @()
-        foreach ($s in $streams) {
-          $pngPath = $s[0]; $ms = $s[1]; $len = [UInt32]$s[2]
-          $offset = [UInt32]$fs.Position
-          $ms.Position = 0
-          $ms.CopyTo($fs)
-          $entryData += ,@($pngPath, $len, $offset)
-        }
-
-        $fs.Position = $entriesPos
-        foreach ($e in $entryData) {
-          $name = [System.IO.Path]::GetFileNameWithoutExtension($e[0])
-          if ($name -match '(\d+)x(\d+)') { $w=[int]$matches[1]; $h=[int]$matches[2] } else { $w=256; $h=256 }
-          $byteW = if ($w -ge 256) { 0 } else { [byte]$w }
-          $byteH = if ($h -ge 256) { 0 } else { [byte]$h }
-
-          $bw.Write([byte]$byteW)
-          $bw.Write([byte]$byteH)
-          $bw.Write([byte]0)            # colors
-          $bw.Write([byte]0)            # reserved
-          $bw.Write([UInt16]1)          # planes
-          $bw.Write([UInt16]32)         # bitcount
-          $bw.Write([UInt32]$e[1])      # bytesInRes
-          $bw.Write([UInt32]$e[2])      # offset
-        }
-
-      } finally { $fs.Dispose() }
-    } finally {
-      foreach ($s in $streams) { $s[1].Dispose() }
-    }
-  }
-
-  $img = [System.Drawing.Image]::FromFile($logo)
-  try {
-    $p32   = Join-Path $MyResDir '32x32.png'
-    $p64   = Join-Path $MyResDir '64x64.png'
-    $p128  = Join-Path $MyResDir '128x128.png'
-    $p256  = Join-Path $MyResDir '128x128@2x.png' 
-    $pIcon = Join-Path $MyResDir 'icon.png'      
-
-    Resize-SavePng $img 32  $p32
-    Resize-SavePng $img 64  $p64
-    Resize-SavePng $img 128 $p128
-    Resize-SavePng $img 256 $p256
-    Resize-SavePng $img 256 $pIcon
-
-    # icon.ico mit 16/32/48/64/128
-    $tmpDir = Join-Path $MyResDir '_tmp_ico'
-    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-    try {
-      $p16  = Join-Path $tmpDir '16x16.png'
-      $p24  = Join-Path $tmpDir '24x24.png'
-      $p48  = Join-Path $tmpDir '48x48.png'
-      Resize-SavePng $img 16  $p16
-      Resize-SavePng $img 24  $p24
-      Resize-SavePng $img 48  $p48
-
-      $iconIco = Join-Path $MyResDir 'icon.ico'
-      $trayIco = Join-Path $MyResDir 'tray-icon.ico'
-
-      New-IcoFromPngs $iconIco @($p16,$p24,$p32,$p48,$p64,$p128,$p256)
-      New-IcoFromPngs $trayIco @($p16,$p24,$p32)
-    } finally {
-      Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-  }
-  finally { $img.Dispose() }
+    magick $logo (Join-Path $MyResDir "icon.svg")
+    magick $logo -define icon:auto-resize=256,64,48,32,16 (Join-Path $MyResDir "icon.ico")
+    magick $logo -resize 32x32 (Join-Path $MyResDir "32x32.png")
+    magick $logo -resize 64x64 (Join-Path $MyResDir "64x64.png")
+    magick $logo -resize 128x128 (Join-Path $MyResDir "128x128.png")
+    magick (Join-Path $MyResDir "128x128.png") -resize 200% (Join-Path $MyResDir "128x128@2x.png")
+    Copy-Item (Join-Path $MyResDir "icon.ico") (Join-Path $MyResDir "tray-icon.ico")
 
   Ok 'Ressourcen aus logo.png generiert (PNG + ICO).'
 }
-
 
 function Patch-IconBase64 {
   $png = Join-Path $MyResDir '32x32.png'
@@ -618,119 +695,203 @@ function Copy-Resources {
 
 function Set-Icon {
   $src = Join-Path $MyResDir 'icon.ico'
-  $dst = Join-Path $RustDeskDir 'flutter\windows\runner\resources\app_icon.ico'
+  $dst = Join-Path "$RustDeskDir" 'flutter\windows\runner\resources\app_icon.ico'
   $dir = Split-Path $dst -Parent
   if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
   if (Test-Path $src) { Copy-Item $src $dst -Force; Ok ("Icon gesetzt: {0}" -f $dst) } else { Warn 'icon.ico nicht gefunden - Icon unveraendert.' }
 }
 
-# =================== build (cmd script) ===================
-function Write-CmdScript {
+# =================== build (client) ===================
+function Build-Client {
   if (-not (Test-Path $Vcvars)) { Fail 'vcvarsall.bat nicht gefunden - CMD-Build wird nicht erzeugt.' }
 
-  $cmd = New-Object System.Collections.Generic.List[string]
-  $cmd.Add('@echo off')
-  $cmd.Add('setlocal')
-  $cmd.Add(("cd /d ""{0}""" -f $Root))
-  $cmd.Add(('echo [..] Using vcvars: "{0}"' -f $Vcvars))
-  $cmd.Add(('if not exist "{0}" (' -f $Vcvars))
-  $cmd.Add(('  echo [XX] vcvarsall.bat not found at "{0}"' -f $Vcvars))
-  $cmd.Add('  exit /b 1')
-  $cmd.Add(')')
-  $cmd.Add(('call "{0}" amd64' -f $Vcvars))
-  $cmd.Add('if errorlevel 1 exit /b 1')
-  $cmd.Add('echo [OK] vcvars environment loaded.')
-  $cmd.Add(('set "VCPKG_ROOT={0}"' -f $VcpkgDir))
-  $cmd.Add('set "VCPKG_DEFAULT_TRIPLET=x64-windows-static"')
-  $cmd.Add('echo [OK] VCPKG_ROOT=%VCPKG_ROOT%, TRIPLET=%VCPKG_DEFAULT_TRIPLET%')
+  cmd /c $Vcvars amd64
+  if ($LASTEXITCODE -ne 0) { Fail 'Build fehlgeschlagen.' }
+  Ok ("vcvars environment loaded.")
+  OK ("VCPKG_ROOT={0}, TRIPLET={1}" -f $VcpkgDir,$Env:VCPKG_DEFAULT_HOST_TRIPLET)
+  
+  Set-Location "$RustDeskDir"
 
   if ($SkipVcpkgInstall) {
-    $cmd.Add('echo [..] Skip vcpkg install (per parameter).')
+    Say ("Skip vcpkg install (per parameter).")
   } else {
-    $cmd.Add('if exist "%VCPKG_ROOT%\installed\%VCPKG_DEFAULT_TRIPLET%\include\opus\opus_multistream.h" (')
-    $cmd.Add('  echo [OK] opus headers present in vcpkg.')
-    $cmd.Add(') else (')
-    $cmd.Add('  echo [..] vcpkg install (libvpx, libyuv, opus, aom)')
-    $cmd.Add('  "%VCPKG_ROOT%\vcpkg.exe" install libvpx:%VCPKG_DEFAULT_TRIPLET% libyuv:%VCPKG_DEFAULT_TRIPLET% opus:%VCPKG_DEFAULT_TRIPLET% aom:%VCPKG_DEFAULT_TRIPLET%')
-    $cmd.Add('  if errorlevel 1 exit /b 1')
-    $cmd.Add('  echo [OK] vcpkg install done.')
-    $cmd.Add(')')
+    Say("vcpkg installiere abhaengigkeiten")
+    & $VcpkgDir\vcpkg install --triplet $Env:VCPKG_DEFAULT_HOST_TRIPLET --x-install-root="$VcpkgDir\installed"
+    if ($LASTEXITCODE -ne 0) { Fail("vcpkg fehlgeschlagen.") }
+    Ok("vcpkg installiert.")
   }
+  
+  if (!(Test-Path "target\debug")) {
+      New-Item -Path target\debug -Type Directory | Out-Null
+  }
+  if (!(Test-Path "target\release")) {
+      New-Item -Path target\release -Type Directory | Out-Null
+  }
+  Say ("Kopiere sciter.dll nach target..")
+  Copy-Item "$SciterDllCache" target\debug -Force
+  Copy-Item "$SciterDllCache" target\release -Force
 
-  $cmd.Add(('set "LIBCLANG_PATH={0}"' -f $LlvmBin))
-  $cmd.Add('echo [OK] LIBCLANG_PATH=%LIBCLANG_PATH%')
-
-  $cmd.Add(("cd /d ""{0}""" -f $RustDeskDir))
+  $Env:LIBCLANG_PATH = $LlvmBin
+  Ok ("LIBCLANG_PATH={0}" -f $LlvmBin)
 
   if (-not $NoCleanBuild) {
-    $cmd.Add('echo [..] cargo clean')
-    $cmd.Add('cargo clean')
+    Say "[..] cargo clean"
+    cargo clean
   } else {
-    $cmd.Add('echo [..] skip cargo clean (NoCleanBuild)')
+    Say "[..] skip cargo clean (NoCleanBuild)"
+  }
+  
+  $Env:RUSTFLAGS="-C target-feature=+crt-static"
+  Say "Erstelle RustDesk Client Bibliothek"
+  python .\build.py --hwcodec --flutter --vram --skip-portable-pack
+  if ($LASTEXITCODE -ne 0) { Fail("build fehlgeschlagen.") }
+
+  Say "Erstelle portable Exe"
+  if (Test-Path "portable-pack") {
+      Remove-Item -Path portable-pack -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+  }
+  New-Item -Path portable-pack -Type Directory | Out-Null
+  Copy-Item (Join-Path flutter\build\windows\x64\runner\Release *) .\portable-pack -Force -Recurse
+
+  Say "Entpacke... usbmmidd_v2"
+  [System.IO.Compression.ZipFile]::ExtractToDirectory($UsbmmiddCache, $PWD)
+  Remove-Item -Path usbmmidd_v2\Win32 -Recurse
+  Remove-Item -Path usbmmidd_v2\deviceinstaller64.exe, usbmmidd_v2\deviceinstaller.exe, usbmmidd_v2\usbmmidd.bat
+  Move-Item -Force usbmmidd_v2 portable-pack
+  Ok ""
+
+  if (Test-Path "$MyResDir\icon.png") {
+    Say "Icon fuer Portable erstellen"
+    Copy-Item (Join-Path $MyResDir "icon.svg") "portable-pack\data\flutter_assets\assets\icon.svg"
+    Copy-Item (Join-Path $MyResDir "icon.png") "portable-pack\data\flutter_assets\assets\logo.png" -Force
+    Ok ""
   }
 
-  $cmd.Add('if not exist "target\debug"   mkdir target\debug')
-  $cmd.Add('if not exist "target\release" mkdir target\release')
-  
-  $cmd.Add('echo [..] Use cached sciter.dll')
-  $cmd.Add(("copy /y ""{0}"" target\debug\sciter.dll   >nul" -f $SciterDllCache))
-  $cmd.Add(("copy /y ""{0}"" target\release\sciter.dll >nul" -f $SciterDllCache))
-  
-  $cmd.Add('set RUSTFLAGS=-C target-feature=+crt-static')
-  $cmd.Add('echo [..] cargo build --release')
-  $cmd.Add('cargo build --release')
-  $cmd.Add('if errorlevel 1 exit /b 1')
-  $cmd.Add('echo [OK] cargo build finished.')
-
-  $cmd.Add(("cd /d ""{0}""" -f $RustDeskDir))
-  $cmd.Add('echo [..] Prepare NSIS package layout')
-  $cmd.Add('rmdir /s /q pkg 2>nul')
-  $cmd.Add('mkdir pkg')
-  $cmd.Add('copy /y target\release\rustdesk.exe pkg\ >nul')
-  $cmd.Add('copy /y target\release\sciter.dll   pkg\ >nul')
-  $cmd.Add('mkdir pkg\src')
-  $cmd.Add('xcopy /e /i /y src\ui pkg\src\ui >nul')
-  $cmd.Add('echo [OK] Package tree ready (pkg\...).')
-
-  if ($NoPack) {
-    $cmd.Add('echo [..] NSIS pack skipped.')
+  Say "Kopiere Runner.res nach Portable"
+  $runner_res = Get-ChildItem . -Filter "Runner.res" -Recurse | Select-Object -First 1
+  if (!$runner_res) {
+    Warn "Runner.res: nicht gefunden"
   } else {
-    $cmd.Add(("echo [..] NSIS pack... '{0}' '{1}'" -f $Makensis,$NsisScript))
-    $cmd.Add((' "{0}" "{1}"' -f $Makensis,$NsisScript))
+    Copy-Item $runner_res.FullName "libs\portable" -Force
+    Ok ""
   }
+  
+  Say "Kopiere WindowInjection.dll"
+  Copy-Item $WindowInjectionDLL .\portable-pack -Force
+  Ok ""
 
-  $cmd.Add('echo [OK] CMD stage completed.')
-  $cmd.Add('endlocal')
+  $exe = "rustdesk.exe"
+  if ($AppName -ne "rustdesk") {
+    $stem = ($AppName -replace '[^A-Za-z0-9._-]','-') -replace '-{2,}','-'
+    $stem = $stem.Trim('-'); if ([string]::IsNullOrWhiteSpace($stem)) { $stem = 'rustdesk' }
+    $exe  = "$stem.exe"
+    #darf nicht umbenannt werden
+    #Move-Item "portable-pack\rustdesk.exe" (Join-Path portable-pack $exe)
+  }
+  Say "Deaktiviere DPI awareness fuer bessere Aufloesung"
+  ReplaceInFile -File res\manifest.xml -UseRegex -pattern ".*dpiAware.*" -NewString ""
+  Ok ""
 
-  $script:CmdFile = Join-Path $Root 'build-run.cmd'
-  Set-Content -Path $CmdFile -Value $cmd -Encoding ASCII
-  Ok ("CMD-Skript geschrieben: {0}" -f $CmdFile)
+  Push-Location .\libs\portable
+  pip3 install -r requirements.txt
+  python .\generate.py -f ..\..\portable-pack\ -o . -e "..\..\portable-pack\rustdesk.exe"
+  Pop-Location
+  Move-Item .\target\release\rustdesk-portable-packer.exe (Join-Path $Root $exe) -Force
+  
+  Ok ("Portable build Fertig! {0}" -f (Join-Path $Root $exe))
 }
 
-function Run-CmdScript {
-  Say 'Starte Build (CMD via vcvarsall)...'
-  & cmd.exe /c "`"$CmdFile`""
-  if ($LASTEXITCODE -ne 0) { Fail 'Build fehlgeschlagen.' }
-  Ok 'FERTIG. Wenn nicht -NoPack: NSIS-Ausgabe erstellt.'
+function Ask-And-Uninstall {
+  $tools = @(
+    "Git.Git",
+    "Rustlang.Rustup",
+    "Rustlang.Rust.MSVC",
+    "Rustlang.Rust.GNU",
+    "Python.Python.3.13",
+    "LLVM.LLVM",
+    "ImageMagick.Q16-HDRI",
+    "Microsoft.VisualStudio.2022.BuildTools"
+  )
+  $removeTools = @()
+  foreach ($tool in $tools) {
+    winget list -e --id $tool | Out-Null
+    if ($LASTEXITCODE -eq 0) { 
+      if ($tool -eq "Microsoft.VisualStudio.2022.BuildTools") {
+        say "Visual Studio 2022 Build Tools, C++ Toolchain, Win10 SDK, CMake"
+      }
+      Say $tool
+      $removeTools += $tool
+    }
+  }
+
+  say "(x) - Einzeln abfragen"
+  $answer = Read-Host 'Sollen alle oben genannten Tools deinstalliert werden? (j/n/x)'
+  if ($answer -in @('J','j','Y','y','Ja','ja','Yes','yes','X','x')) {
+    $ask = $answer -in @('X','x')
+    foreach ($tool in $removeTools) {
+      if ($tool -eq "Microsoft.VisualStudio.2022.BuildTools") {continue}
+      if ($ask) {
+        $answer = Read-Host "Soll [$tool] deinstalliert werden? (j/n)"
+        if ($answer -notin @('J','j','Y','y','Ja','ja','Yes','yes')) {
+          continue
+        }
+      }
+      Say "Entferne $tool mit winget..."
+      winget uninstall --id $tool --exact --silent --accept-source-agreements --purge --force | Out-Null
+      Ok "Fertig"
+    }
+    if ($ask -and "Microsoft.VisualStudio.2022.BuildTools" -in $removeTools) {
+      $answer = Read-Host "Soll [Visual Studio 2022 Build Tools, C++ Toolchain, Win10 SDK, CMake] deinstalliert werden? (j/n)"
+      if ($answer -in @('J','j','Y','y','Ja','ja','Yes','yes')) {
+        Say "Entferne VS Build Tools..."
+        winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --silent --accept-package-agreements --accept-source-agreements --force --override "--remove Microsoft.VisualStudio.Workload.VCTools --remove Microsoft.VisualStudio.Component.Windows10SDK.19041 --remove Microsoft.VisualStudio.Component.VC.CMake.Project --includeRecommended --passive --norestart" | Out-Null
+        while ((Get-Process -Name setup -ErrorAction SilentlyContinue).MainWindowTitle -eq "Visual Studio Installer") {
+          Start-Sleep 2
+        }
+        winget uninstall --id Microsoft.VisualStudio.2022.BuildTools --exact --silent --accept-source-agreements --purge --force | Out-Null
+        Ok "Fertig"
+      }
+    }
+  }
 }
 
 # =================== main ===================
-Get-Inputs
-Ensure-RootOnNtfs -Root $Root
-Test-And-Handle-ASLR
-Ensure-NSIS
-Ensure-LLVM
-#Ensure-Perl
-Ensure-RustToolchain
-Find-Vcvars
-Ensure-Vcpkg
-Clone-RustDesk
-Patch-Config
-Patch-NSIS
-Generate-ResourcesFromLogo
-Patch-IconBase64
-Copy-Resources
-Set-Icon
-Ensure-SciterDll
-Write-CmdScript
-Run-CmdScript
+try {
+  if ($Uninstall) {
+    Ask-And-Uninstall
+    return 
+  }
+
+  Get-Inputs
+  Ensure-RootOnNtfs -Root $Root
+  Test-And-Handle-ASLR
+  
+  Ensure-LLVM
+  Ensure-Python
+  Ensure-RustToolchain
+  Find-Vcvars
+  Find-MSBuildTools
+  Ensure-Vcpkg
+  Ensure-Flutter
+  Ensure-usbmmidd
+  Ensure-ImageMagick
+  Ensure-SciterDll
+
+  Clone-RustDesk
+  Generate-RustBridge
+  Generate-RustDeskTempTopMostWindow
+  Patch-Config
+  Patch-Client
+  Generate-ResourcesFromLogo
+  Patch-IconBase64
+  Copy-Resources
+  Set-Icon
+  
+  Build-Client
+
+} catch {
+  Fail $_
+} finally {
+  Set-Location $Root
+  $ProgressPreference = $defaultProgressPreference
+}
