@@ -785,7 +785,8 @@ function Build-Client {
     $stem = ($AppName -replace '[^A-Za-z0-9._-]','-') -replace '-{2,}','-'
     $stem = $stem.Trim('-'); if ([string]::IsNullOrWhiteSpace($stem)) { $stem = 'rustdesk' }
     $exe  = "$stem.exe"
-    Move-Item "portable-pack\rustdesk.exe" (Join-Path portable-pack $exe)
+    #darf nicht umbenannt werden
+    #Move-Item "portable-pack\rustdesk.exe" (Join-Path portable-pack $exe)
   }
   Say "Deaktiviere DPI awareness fuer bessere Aufloesung"
   ReplaceInFile -File res\manifest.xml -UseRegex -pattern ".*dpiAware.*" -NewString ""
@@ -793,7 +794,7 @@ function Build-Client {
 
   Push-Location .\libs\portable
   pip3 install -r requirements.txt
-  python .\generate.py -f ..\..\portable-pack\ -o . -e "..\..\portable-pack\$exe"
+  python .\generate.py -f ..\..\portable-pack\ -o . -e "..\..\portable-pack\rustdesk.exe"
   Pop-Location
   Move-Item .\target\release\rustdesk-portable-packer.exe (Join-Path $Root $exe) -Force
   
