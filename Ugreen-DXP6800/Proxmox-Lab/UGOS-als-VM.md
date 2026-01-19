@@ -27,8 +27,8 @@ qm create 901 \
   --ostype l26 \
   --memory 4096 \
   --balloon 0 \
-  --sockets 2 \
-  --cores 2 \
+  --sockets 1 \
+  --cores 4 \
   --scsihw virtio-scsi-pci
 qm set 901 --efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0
 qm config 901
